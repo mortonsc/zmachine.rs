@@ -1,5 +1,4 @@
 use std::convert::{TryInto, TryFrom};
-use crate::util;
 
 // a ZChar is a 5-bit value
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -45,10 +44,10 @@ impl<'a, I: Iterator<Item = &'a u8>> ZCharsFromBytes<I> {
     }
 
     fn next_word(&mut self) -> Option<TextWord> {
-        Some(TextWord::from(util::assemble_u16(
+        Some(TextWord::from(u16::from_be_bytes([
             *self.text.next()?,
             *self.text.next()?,
-        )))
+        ])))
     }
 }
 
@@ -220,7 +219,8 @@ impl UnicodeTransTable {
         low_bytes.next();
         let mut table: Vec<char> = Vec::with_capacity(spec.len() / 2);
         for (high, low) in high_bytes.zip(low_bytes) {
-            let codepoint = util::assemble_u16(*high, *low) as u32;
+            let codepoint = u32::from_be_bytes([0x00, 0x00, *high, *low]);
+            // TODO: handle errors better
             let c = char::try_from(codepoint).ok()?;
             table.push(c);
         }

@@ -8,3 +8,5 @@ edition = "2018"
 
 [dependencies]
 lazy_static = "1.4"
+num = "0.2"
+enum_primitive = "*"
