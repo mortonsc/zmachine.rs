@@ -1,12 +1,32 @@
 use std::convert::{TryInto, TryFrom};
+use itertools::Itertools;
 
 // a ZChar is a 5-bit value
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ZChar(u8);
 
+impl ZChar {
+    const SPACE: Self = ZChar(0);
+    const SHIFT_A1: Self = ZChar(4);
+    const SHIFT_A2: Self = ZChar(5);
+    const A2_COMPOSITE_START: Self = ZChar(6);
+    const A2_NEWLINE: Self = ZChar(7);
+}
+
 // Zscii chars are nominally 10bit but only the bottom 8 are used
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Zscii(u8);
+
+impl Zscii {
+    const NEWLINE: Self = Zscii(13);
+    const SPACE: Self = Zscii(b' ');
+}
+
+impl Zscii {
+    fn decompose(self) -> (ZChar, ZChar) {
+        (ZChar(self.0 >> 5), ZChar(self.0 & 0x1f))
+    }
+}
 
 #[derive(Debug, Clone, Copy)]
 struct TextWord {
@@ -24,6 +44,17 @@ impl From<u16> for TextWord {
                 ZChar((word & bitmask) as u8),
             ],
             is_end: (word >> 15) != 0,
+        }
+    }
+}
+
+impl From<TextWord> for u16 {
+    fn from(word: TextWord) -> u16 {
+        let text: u16 = word.zchars.iter().fold(0, |acc, zc| (acc << 5) & (zc.0 as u16));
+        if word.is_end {
+            text & 0x80
+        } else {
+            text
         }
     }
 }
@@ -214,16 +245,16 @@ lazy_static! {
 impl UnicodeTransTable {
     pub fn from_byte_array(spec: &[u8]) -> Option<Self> {
         assert!(spec.len() % 2 == 0);
-        let high_bytes = spec.iter();
-        let mut low_bytes = spec.iter();
-        low_bytes.next();
-        let mut table: Vec<char> = Vec::with_capacity(spec.len() / 2);
-        for (high, low) in high_bytes.zip(low_bytes) {
-            let codepoint = u32::from_be_bytes([0x00, 0x00, *high, *low]);
-            // TODO: handle errors better
-            let c = char::try_from(codepoint).ok()?;
-            table.push(c);
-        }
+        let table: Vec<char> = spec.iter()
+            .batching(|it| {
+                let high = *it.next()?;
+                //TODO: handle as an error if missing
+                let low = *it.next()?;
+                Some(u32::from_be_bytes([0x00, 0x00, high, low]))
+            })
+            .map(|cp| char::try_from(cp).ok()) //TODO: better error handling
+            .collect::<Option<Vec<_>>>()?;
+
         Some(UnicodeTransTable{table})
     }
 }
@@ -279,6 +310,81 @@ impl<'a, I: 'a + IntoIterator<Item=Zscii>> UnicodeFromZscii<'a> for I {
     }
 }
 
+impl UnicodeTransTable {
+    fn find_zscii_trans(&self, uni: char) -> Option<Zscii> {
+        self.table.iter()
+            .position(|&c| c == uni)
+            .map(|idx| Zscii(u8::try_from(idx + 155).unwrap()))
+    }
+}
+
+impl Zscii {
+    fn from_unicode(uni: char, utt: &UnicodeTransTable) -> Option<Zscii> {
+        match uni {
+            ' '..='~' => Some(Zscii(u8::try_from(uni as u32).unwrap())),
+            '\n' => Some(Zscii(0x0d)),
+            _ => utt.find_zscii_trans(uni),
+        }
+    }
+}
+
+struct ZsciiToZChars<'a, I> {
+    zscii_chars: I,
+    alph_table: AlphTable<'a>,
+    buf: Vec<ZChar>,
+}
+
+impl<'a, I> Iterator for ZsciiToZChars<'a, I>
+where I: Iterator<Item=Zscii>
+{
+    type Item = ZChar;
+    fn next(&mut self) -> Option<Self::Item> {
+        if !self.buf.is_empty() {
+            return self.buf.pop();
+        }
+        let zscii = self.zscii_chars.next()?;
+        if zscii == Zscii::SPACE {
+            Some(ZChar::SPACE)
+        } else if zscii == Zscii::NEWLINE {
+            self.buf.push(ZChar::A2_NEWLINE);
+            Some(ZChar::SHIFT_A2)
+        } else if let Some((zchar, alph)) = self.alph_table.find_zchar_trans(zscii) {
+            match alph {
+                Alph::A0 => Some(zchar),
+                Alph::A1 => {
+                    self.buf.push(zchar);
+                    Some(ZChar::SHIFT_A1)
+                },
+                Alph::A2 => {
+                    self.buf.push(zchar);
+                    Some(ZChar::SHIFT_A2)
+                }
+            }
+        } else {
+            // represent as composite character
+            let (high, low) = zscii.decompose();
+            self.buf.push(low);
+            self.buf.push(high);
+            self.buf.push(ZChar::A2_COMPOSITE_START);
+            Some(ZChar::SHIFT_A2)
+        }
+    }
+}
+
+impl<'a> AlphTable<'a> {
+    fn find_zchar_trans(&self, zscii: Zscii) -> Option<(ZChar, Alph)> {
+        if let Some(idx) = self.rows[0].iter().position(|&z| z == zscii.0) {
+            Some((ZChar(u8::try_from(idx + 6).unwrap()), Alph::A0))
+        } else if let Some(idx) = self.rows[1].iter().position(|&z| z == zscii.0) {
+            Some((ZChar(u8::try_from(idx + 6).unwrap()), Alph::A1))
+        } else if let Some(idx) = self.rows[2][2..].iter().position(|&z| z == zscii.0) {
+            Some((ZChar(u8::try_from(idx + 6).unwrap()), Alph::A2))
+        } else {
+            None
+        }
+
+    }
+}
 
 
 #[cfg(test)]
