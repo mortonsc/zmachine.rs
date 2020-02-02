@@ -245,7 +245,7 @@ pub struct CustomUTT<'a> {
 }
 
 lazy_static! {
-    pub static ref DEFAULT_UTT: Vec<char>  = {
+    pub static ref DEFAULT_UTT: Vec<char> = {
         let table = "äöüÄÖÜß»«ëïÿËÏáéíóúýÁÉÍÓÚÝàèìòùÀÈÌÒÙ\
                      âêîôûÂÊÎÔÛåÅøØãñõÃÑÕæÆçÇþðÞÐ£œŒ¡¿"
             .chars()
@@ -261,13 +261,15 @@ impl<'a> UnicodeTransTable<'a> {
     // so they're defined as usize's for convenience
     const ZSCII_RANGE_START: usize = 155;
     const ZSCII_RANGE_END: usize = 251;
+    // in units of u16
     const MAX_SIZE: usize = Self::ZSCII_RANGE_END - Self::ZSCII_RANGE_START + 1;
 
     pub fn from_memory(bytes: &'a [u8]) -> Option<Self> {
-        // first byte contains length (in 2-byte characters)
-        let len = 2 * (bytes[0] as usize);
-        if (len > 0) && (len <= Self::MAX_SIZE) && (bytes[1..].len() >= len) {
-            let table = &bytes[1..=len];
+        // first byte contains length (in units of u16)
+        let len_w = *bytes.get(0)? as usize;
+        if (len_w > 0) && (len_w <= Self::MAX_SIZE) {
+            let len_b = 2 * len_w;
+            let table = bytes.get(1..=len_b)?;
             Some(UnicodeTransTable::Custom(CustomUTT { table }))
         } else {
             None
@@ -282,7 +284,7 @@ impl<'a> UnicodeTransTable<'a> {
             }
             UnicodeTransTable::Custom(utt) => {
                 let index = 2 * ((zscii.0 as usize) - Self::ZSCII_RANGE_START);
-                let bytes = utt.table.get(index..=index+1)?;
+                let bytes = utt.table.get(index..=index + 1)?;
                 let scalar_val = u16::from_be_bytes([bytes[0], bytes[1]]);
                 char::try_from(scalar_val as u32).ok()
             }
@@ -300,7 +302,9 @@ impl<'a> UnicodeTransTable<'a> {
             }
             UnicodeTransTable::Custom(utt) => {
                 let target = u16::try_from(unicode as u32).ok()?;
-                index = utt.table.iter()
+                index = utt
+                    .table
+                    .iter()
                     .tuples()
                     .map(|(&high, &low)| u16::from_be_bytes([high, low]))
                     .position(|dw| dw == target)?;
@@ -332,11 +336,9 @@ impl Zscii {
             27 => Err(ZsciiError::InputOnly(zb)),        // esc
             32..=126 => Ok(zb as char),                  // standard ascii
             129..=154 => Err(ZsciiError::InputOnly(zb)), // arrow keys, function keys, keypad
-            155..=251 => {
-                utt.zscii_to_unicode(self).ok_or(
-                    ZsciiError::UnicodeTransMissing(zb)
-                )
-            }
+            155..=251 => utt
+                .zscii_to_unicode(self)
+                .ok_or(ZsciiError::UnicodeTransMissing(zb)),
             254 => Err(ZsciiError::InputOnly(zb)), // mouse click
             _ => Err(ZsciiError::Undefined(zb)),
         }
@@ -358,12 +360,11 @@ impl<'a, I: 'a + IntoIterator<Item = Zscii>> UnicodeFromZscii<'a> for I {
     }
 }
 
-
 impl Zscii {
     fn from_unicode(uni: char, utt: &UnicodeTransTable) -> Option<Zscii> {
         match uni {
             // "interpreting $60 as a grave accent is to be avoided."
-            '`' => Some(Zscii(b'\'')) ,
+            '`' => Some(Zscii(b'\'')),
             '\n' => Some(Zscii(0x0d)),
             ' '..='~' => Some(Zscii(u8::try_from(uni as u32).unwrap())),
             _ => utt.unicode_to_zscii(uni),
@@ -437,7 +438,6 @@ mod tests {
     #[test]
     fn test_zchar_decode() {
         let text: Vec<u8> = vec![0x35, 0x51, 0xc6, 0x85, 0x77, 0xdf];
-        // let mut zchar_iter = text.iter().zchars();
         let mut zchar_iter = text.iter().zchars();
         assert_eq!(zchar_iter.next().unwrap(), ZChar(0x0d));
         assert_eq!(zchar_iter.next().unwrap(), ZChar(0x0a));
@@ -459,21 +459,59 @@ mod tests {
         assert_eq!(decoded, "hello");
     }
 
-    #[test]
-    fn test_utt() {
-        let custom_utt_str = "äëïöü";
-        let high_byte_iter = custom_utt_str.encode_utf16()
-            .map(|dw| u8::try_from(dw >> 8).unwrap());
-        let low_byte_iter = custom_utt_str.encode_utf16()
-            .map(|dw| u8::try_from(dw & 0xff).unwrap());
-        let mut custom_utt_vec = iter::once(0)
+    fn utt_vec_from_str(utt_str: &str) -> Vec<u8> {
+        let high_byte_iter = utt_str
+            .encode_utf16()
+            .map(|w| u8::try_from(w >> 8).unwrap());
+        let low_byte_iter = utt_str
+            .encode_utf16()
+            .map(|w| u8::try_from(w & 0xff).unwrap());
+        let mut utt_vec = iter::once(0)
             .chain(high_byte_iter.interleave(low_byte_iter))
             .collect::<Vec<u8>>();
-        let len_dwords = (custom_utt_vec.len() - 1) / 2;
-        custom_utt_vec[0] = u8::try_from(len_dwords).unwrap();
-        let utt = UnicodeTransTable::from_memory(&custom_utt_vec[..]).unwrap();
-        let scalar_val = u16::try_from('ü' as u32).unwrap();
+        let len_words = (utt_vec.len() - 1) / 2;
+        utt_vec[0] = u8::try_from(len_words).unwrap();
+        utt_vec
+    }
+
+    #[test]
+    fn test_utt_basic() {
+        let utt_vec = utt_vec_from_str("äëïöü");
+        let utt = UnicodeTransTable::from_memory(&utt_vec).unwrap();
+
+        assert_eq!(utt.zscii_to_unicode(Zscii(155)).unwrap(), 'ä');
+        assert_eq!(utt.unicode_to_zscii('ä').unwrap(), Zscii(155));
+
+        assert_eq!(utt.zscii_to_unicode(Zscii(156)).unwrap(), 'ë');
+        assert_eq!(utt.unicode_to_zscii('ë').unwrap(), Zscii(156));
+
         assert_eq!(utt.zscii_to_unicode(Zscii(159)).unwrap(), 'ü');
         assert_eq!(utt.unicode_to_zscii('ü').unwrap(), Zscii(159));
+    }
+
+    #[test]
+    fn test_utt_bounds() {
+        // construct a big UTT
+        // starting point picked so that Zscii(251) translates to '~'
+        let mut chars = 30u8..;
+        let mut zeroes = iter::once(0u8).cycle();
+
+        // start by making it just a little too big
+        let excessive_len = 1 + u8::try_from(UnicodeTransTable::MAX_SIZE).unwrap();
+        let mut utt_vec = iter::once(excessive_len)
+            .chain(zeroes.interleave(chars))
+            .take((2 * excessive_len) as usize)
+            .collect::<Vec<u8>>();
+        assert!(UnicodeTransTable::from_memory(&utt_vec).is_none());
+
+        // now try just the right size
+        utt_vec[0] = excessive_len - 1;
+        utt_vec.pop();
+        let utt = UnicodeTransTable::from_memory(&utt_vec).unwrap();
+
+        assert_eq!(utt.zscii_to_unicode(Zscii(251)).unwrap(), '~');
+        assert_eq!(utt.unicode_to_zscii('~').unwrap(), Zscii(251));
+
+        assert!(utt.zscii_to_unicode(Zscii(252)).is_none());
     }
 }
