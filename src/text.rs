@@ -233,36 +233,81 @@ impl<'a, I: IntoIterator<Item = ZChar>> ZsciiDecodable<'a> for I {
     }
 }
 
-pub struct UnicodeTransTable {
-    table: Vec<char>,
+#[derive(Debug, Clone, Copy)]
+pub enum UnicodeTransTable<'a> {
+    Default,
+    Custom(CustomUTT<'a>),
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct CustomUTT<'a> {
+    table: &'a [u8],
 }
 
 lazy_static! {
-    pub static ref DEFAULT_UTT: UnicodeTransTable = {
+    pub static ref DEFAULT_UTT: Vec<char>  = {
         let table = "äöüÄÖÜß»«ëïÿËÏáéíóúýÁÉÍÓÚÝàèìòùÀÈÌÒÙ\
                      âêîôûÂÊÎÔÛåÅøØãñõÃÑÕæÆçÇþðÞÐ£œŒ¡¿"
             .chars()
             .collect::<Vec<char>>();
         assert!(table.len() == (223 - 155 + 1));
-        UnicodeTransTable { table }
+        table
     };
 }
 
-impl UnicodeTransTable {
-    pub fn from_byte_array(spec: &[u8]) -> Option<Self> {
-        assert!(spec.len() % 2 == 0);
-        let table: Vec<char> = spec
-            .iter()
-            .batching(|it| {
-                let high = *it.next()?;
-                //TODO: handle as an error if missing
-                let low = *it.next()?;
-                Some(u32::from_be_bytes([0x00, 0x00, high, low]))
-            })
-            .map(|cp| char::try_from(cp).ok()) //TODO: better error handling
-            .collect::<Option<Vec<_>>>()?;
+impl<'a> UnicodeTransTable<'a> {
+    // range start/end are really zscii values ie u8's
+    // but we add and subtract them to/from indexes into the table
+    // so they're defined as usize's for convenience
+    const ZSCII_RANGE_START: usize = 155;
+    const ZSCII_RANGE_END: usize = 251;
+    const MAX_SIZE: usize = Self::ZSCII_RANGE_END - Self::ZSCII_RANGE_START + 1;
 
-        Some(UnicodeTransTable { table })
+    pub fn from_memory(bytes: &'a [u8]) -> Option<Self> {
+        // first byte contains length (in 2-byte characters)
+        let len = 2 * (bytes[0] as usize);
+        if (len > 0) && (len <= Self::MAX_SIZE) && (bytes[1..].len() >= len) {
+            let table = &bytes[1..=len];
+            Some(UnicodeTransTable::Custom(CustomUTT { table }))
+        } else {
+            None
+        }
+    }
+
+    pub fn zscii_to_unicode(&self, zscii: Zscii) -> Option<char> {
+        match self {
+            UnicodeTransTable::Default => {
+                let index = (zscii.0 as usize) - Self::ZSCII_RANGE_START;
+                DEFAULT_UTT.get(index).copied()
+            }
+            UnicodeTransTable::Custom(utt) => {
+                let index = 2 * ((zscii.0 as usize) - Self::ZSCII_RANGE_START);
+                let bytes = utt.table.get(index..=index+1)?;
+                let scalar_val = u16::from_be_bytes([bytes[0], bytes[1]]);
+                char::try_from(scalar_val as u32).ok()
+            }
+        }
+    }
+
+    pub fn unicode_to_zscii(&self, unicode: char) -> Option<Zscii> {
+        // don't know a better way than exhaustively searching...
+        // can share the same index for both default and custom in this case
+        // because we search the custom table in groups of 2 bytes
+        let index: usize;
+        match self {
+            UnicodeTransTable::Default => {
+                index = DEFAULT_UTT.iter().position(|&c| c == unicode)?;
+            }
+            UnicodeTransTable::Custom(utt) => {
+                let target = u16::try_from(unicode as u32).ok()?;
+                index = utt.table.iter()
+                    .tuples()
+                    .map(|(&high, &low)| u16::from_be_bytes([high, low]))
+                    .position(|dw| dw == target)?;
+            }
+        }
+        let byte = u8::try_from(index + Self::ZSCII_RANGE_START).unwrap();
+        Some(Zscii(byte))
     }
 }
 
@@ -278,25 +323,21 @@ pub enum ZsciiError {
 pub type ZsciiResult<T> = Result<T, ZsciiError>;
 
 impl Zscii {
-    pub fn to_unicode(self, utt: &UnicodeTransTable) -> ZsciiResult<char> {
+    pub fn to_unicode(self, utt: UnicodeTransTable) -> ZsciiResult<char> {
         let zb = self.0;
         match zb {
             0 => Ok('\0'),
             8 => Err(ZsciiError::InputOnly(zb)), //delete
-            9 => Ok('\t'),
-            11 => Ok(' '), // "sentence space"
             13 => Ok('\n'),
             27 => Err(ZsciiError::InputOnly(zb)),        // esc
             32..=126 => Ok(zb as char),                  // standard ascii
             129..=154 => Err(ZsciiError::InputOnly(zb)), // arrow keys, function keys, keypad
             155..=251 => {
-                if let Some(trans) = utt.table.get((zb as usize) - 155) {
-                    Ok(*trans)
-                } else {
-                    Err(ZsciiError::UnicodeTransMissing(zb))
-                }
+                utt.zscii_to_unicode(self).ok_or(
+                    ZsciiError::UnicodeTransMissing(zb)
+                )
             }
-            252..=254 => Err(ZsciiError::InputOnly(zb)), // mouse clicks
+            254 => Err(ZsciiError::InputOnly(zb)), // mouse click
             _ => Err(ZsciiError::Undefined(zb)),
         }
     }
@@ -305,33 +346,27 @@ impl Zscii {
 pub trait UnicodeFromZscii<'a> {
     type UnicodeIter: Iterator<Item = char>;
 
-    fn unicode(self, utt: &'a UnicodeTransTable) -> Self::UnicodeIter;
+    fn unicode(self, utt: UnicodeTransTable<'a>) -> Self::UnicodeIter;
 }
 
 impl<'a, I: 'a + IntoIterator<Item = Zscii>> UnicodeFromZscii<'a> for I {
     type UnicodeIter = Box<dyn Iterator<Item = char> + 'a>;
 
-    fn unicode(self, utt: &'a UnicodeTransTable) -> Self::UnicodeIter {
+    fn unicode(self, utt: UnicodeTransTable<'a>) -> Self::UnicodeIter {
         // TODO: log errors that occur during decoding
         Box::new(self.into_iter().filter_map(move |z| z.to_unicode(utt).ok()))
     }
 }
 
-impl UnicodeTransTable {
-    fn find_zscii_trans(&self, uni: char) -> Option<Zscii> {
-        self.table
-            .iter()
-            .position(|&c| c == uni)
-            .map(|idx| Zscii(u8::try_from(idx + 155).unwrap()))
-    }
-}
 
 impl Zscii {
     fn from_unicode(uni: char, utt: &UnicodeTransTable) -> Option<Zscii> {
         match uni {
-            ' '..='~' => Some(Zscii(u8::try_from(uni as u32).unwrap())),
+            // "interpreting $60 as a grave accent is to be avoided."
+            '`' => Some(Zscii(b'\'')) ,
             '\n' => Some(Zscii(0x0d)),
-            _ => utt.find_zscii_trans(uni),
+            ' '..='~' => Some(Zscii(u8::try_from(uni as u32).unwrap())),
+            _ => utt.unicode_to_zscii(uni),
         }
     }
 }
@@ -397,6 +432,7 @@ impl<'a> AlphTable<'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::iter;
 
     #[test]
     fn test_zchar_decode() {
@@ -418,8 +454,26 @@ mod tests {
         let decoded: String = text
             .zchars()
             .zscii(DEFAULT_ALPH_TABLE)
-            .unicode(&DEFAULT_UTT)
+            .unicode(UnicodeTransTable::Default)
             .collect();
         assert_eq!(decoded, "hello");
+    }
+
+    #[test]
+    fn test_utt() {
+        let custom_utt_str = "äëïöü";
+        let high_byte_iter = custom_utt_str.encode_utf16()
+            .map(|dw| u8::try_from(dw >> 8).unwrap());
+        let low_byte_iter = custom_utt_str.encode_utf16()
+            .map(|dw| u8::try_from(dw & 0xff).unwrap());
+        let mut custom_utt_vec = iter::once(0)
+            .chain(high_byte_iter.interleave(low_byte_iter))
+            .collect::<Vec<u8>>();
+        let len_dwords = (custom_utt_vec.len() - 1) / 2;
+        custom_utt_vec[0] = u8::try_from(len_dwords).unwrap();
+        let utt = UnicodeTransTable::from_memory(&custom_utt_vec[..]).unwrap();
+        let scalar_val = u16::try_from('ü' as u32).unwrap();
+        assert_eq!(utt.zscii_to_unicode(Zscii(159)).unwrap(), 'ü');
+        assert_eq!(utt.unicode_to_zscii('ü').unwrap(), Zscii(159));
     }
 }
