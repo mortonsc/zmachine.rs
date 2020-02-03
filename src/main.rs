@@ -1,9 +1,12 @@
-#[macro_use] extern crate lazy_static;
-#[macro_use] extern crate enum_primitive;
+#[macro_use]
+extern crate lazy_static;
+#[macro_use]
+extern crate enum_primitive;
 
-mod text;
 mod instr;
+mod text;
 mod util;
 
 fn main() {
+    text::test();
 }

@@ -1,5 +1,8 @@
 use itertools::Itertools;
 use std::convert::{TryFrom, TryInto};
+use std::iter;
+
+use crate::util;
 
 // a ZChar is a 5-bit value
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -20,11 +23,44 @@ pub struct Zscii(u8);
 impl Zscii {
     const NEWLINE: Self = Zscii(13);
     const SPACE: Self = Zscii(b' ');
-}
 
-impl Zscii {
     fn decompose(self) -> (ZChar, ZChar) {
         (ZChar(self.0 >> 5), ZChar(self.0 & 0x1f))
+    }
+
+    fn compose(zc1: ZChar, zc2: ZChar) -> Option<Self> {
+        let high = zc1.0 as u16;
+        let low = zc2.0 as u16;
+        let byte = u8::try_from((high << 5) | low).ok()?;
+        Some(Zscii(byte))
+    }
+
+    fn to_unicode(self, utt: UnicodeTransTable) -> ZsciiResult<char> {
+        let zb = self.0;
+        match zb {
+            0 => Ok('\0'),
+            8 => Err(ZsciiError::InputOnly(zb)), //delete
+            13 => Ok('\n'),
+            27 => Err(ZsciiError::InputOnly(zb)),        // esc
+            32..=126 => Ok(zb as char),                  // standard ascii
+            129..=154 => Err(ZsciiError::InputOnly(zb)), // arrow keys, function keys, keypad
+            155..=251 => utt
+                .zscii_to_unicode(self)
+                .ok_or(ZsciiError::UnicodeTransMissing(zb)),
+            253..=254 => Err(ZsciiError::InputOnly(zb)), // mouse clicks
+            _ => Err(ZsciiError::Undefined(zb)),
+        }
+    }
+
+    fn from_unicode(uni: char, utt: UnicodeTransTable) -> Option<Self> {
+        match uni {
+            // "interpreting $60 as a grave accent is to be avoided."
+            // not sure how to implement this directive, leaving this commented
+            // '`' => Some(Zscii(b'\'')),
+            '\n' => Some(Self::NEWLINE),
+            ' '..='~' => Some(Zscii(u8::try_from(uni as u32).unwrap())),
+            _ => utt.unicode_to_zscii(uni),
+        }
     }
 }
 
@@ -53,9 +89,9 @@ impl From<TextWord> for u16 {
         let text: u16 = word
             .zchars
             .iter()
-            .fold(0, |acc, zc| (acc << 5) & (zc.0 as u16));
+            .fold(0, |acc, zc| (acc << 5) | (zc.0 as u16));
         if word.is_end {
-            text & 0x80
+            text | (1 << 15)
         } else {
             text
         }
@@ -68,7 +104,7 @@ pub struct ZCharsFromBytes<I> {
     index: usize,
 }
 
-impl<'a, I: Iterator<Item = &'a u8>> ZCharsFromBytes<I> {
+impl<I: Iterator<Item = u8>> ZCharsFromBytes<I> {
     fn new(iter: I) -> Self {
         ZCharsFromBytes {
             text: iter,
@@ -79,13 +115,13 @@ impl<'a, I: Iterator<Item = &'a u8>> ZCharsFromBytes<I> {
 
     fn next_word(&mut self) -> Option<TextWord> {
         Some(TextWord::from(u16::from_be_bytes([
-            *self.text.next()?,
-            *self.text.next()?,
+            self.text.next()?,
+            self.text.next()?,
         ])))
     }
 }
 
-impl<'a, I: Iterator<Item = &'a u8>> Iterator for ZCharsFromBytes<I> {
+impl<I: Iterator<Item = u8>> Iterator for ZCharsFromBytes<I> {
     type Item = ZChar;
     fn next(&mut self) -> Option<Self::Item> {
         if self.current_word.is_none() {
@@ -117,12 +153,12 @@ pub trait ZCharDecodable {
     fn zchars(self) -> Self::ZCharIter;
 }
 
-impl<'a, I: IntoIterator<Item = &'a u8>> ZCharDecodable for I {
-    type ZCharIter = ZCharsFromBytes<I::IntoIter>;
+impl<I: Iterator<Item = u8>> ZCharDecodable for I {
+    type ZCharIter = ZCharsFromBytes<I>;
 
     #[inline]
     fn zchars(self) -> Self::ZCharIter {
-        ZCharsFromBytes::new(self.into_iter())
+        ZCharsFromBytes::new(self)
     }
 }
 
@@ -199,8 +235,11 @@ impl<'a> AlphTable<'a> {
             b'a'..=b'z' => Some((ZChar(zb - b'a' + Self::ZCHAR_START), Alph::A0)),
             b'A'..=b'Z' => Some((ZChar(zb - b'A' + Self::ZCHAR_START), Alph::A1)),
             _ => {
-                let idx = DEFAULT_ALPH_TABLE[2].iter().position(|&z| z == zb)?;
-                let zc = ZChar(u8::try_from(idx).unwrap() + Self::ZCHAR_START);
+                let idx = DEFAULT_ALPH_TABLE[2]
+                    .iter()
+                    .skip(2)
+                    .position(|&z| z == zb)?;
+                let zc = ZChar(u8::try_from(idx + 2).unwrap() + Self::ZCHAR_START);
                 Some((zc, Alph::A2))
             }
         }
@@ -212,7 +251,7 @@ impl<'a> AlphTable<'a> {
             (idx, Alph::A0)
         } else if let Some(idx) = at.table[1].iter().position(|&z| z == zb) {
             (idx, Alph::A1)
-        } else if let Some(idx) = at.table[2][2..].iter().position(|&z| z == zb) {
+        } else if let Some(idx) = at.table[2].iter().skip(2).position(|&z| z == zb) {
             // index is offset because we ignore the first 2 entries in the A2 row
             (idx + 2, Alph::A2)
         } else {
@@ -221,11 +260,6 @@ impl<'a> AlphTable<'a> {
         let zc = ZChar(u8::try_from(idx).unwrap() + Self::ZCHAR_START);
         Some((zc, alph))
     }
-}
-
-#[inline]
-fn composite_zscii(zc1: ZChar, zc2: ZChar) -> Zscii {
-    Zscii((zc1.0 << 5) | zc2.0)
 }
 
 pub struct ZsciiFromZChars<'a, I> {
@@ -248,24 +282,35 @@ impl<'a, I: Iterator<Item = ZChar>> Iterator for ZsciiFromZChars<'a, I> {
     type Item = Zscii;
     fn next(&mut self) -> Option<Self::Item> {
         let zc = self.zchars.next()?;
-        let zval = zc.0;
-        let zscii = match (self.alph, zval) {
-            (_, 0) => Zscii(b' '),
+        let result = match (self.alph, zc.0) {
+            (_, 0) => Some(Zscii(b' ')),
             (_, 1..=3) => panic!("Abbreviations not implemented yet"),
             (_, 4) => {
                 self.alph = Alph::A1;
-                self.next()?
+                self.next()
             }
             (_, 5) => {
                 self.alph = Alph::A2;
-                self.next()?
+                self.next()
             }
-            (Alph::A2, 6) => composite_zscii(self.zchars.next()?, self.zchars.next()?),
-            (Alph::A2, 7) => Zscii::NEWLINE,
-            (_, _) => self.alph_table.zchar_to_zscii(zc, self.alph).unwrap(),
+            (Alph::A2, 6) => {
+                let first = self.zchars.next()?;
+                let second = self.zchars.next()?;
+                let comp = Zscii::compose(first, second);
+                match comp {
+                    Some(_) => comp,
+                    // skip over invalid compound characters, without stopping the stream
+                    // TODO: not sure if this is acceptable behavior
+                    // if it's not, will have to change Zscii to be backed by u16
+                    None => self.next(),
+                }
+            }
+            (Alph::A2, 7) => Some(Zscii::NEWLINE),
+            // this will always be Some(_) because we've handled all the other cases
+            (_, _) => self.alph_table.zchar_to_zscii(zc, self.alph),
         };
         self.alph = Alph::A0;
-        Some(zscii)
+        result
     }
 }
 
@@ -306,7 +351,7 @@ lazy_static! {
 impl<'a> UnicodeTransTable<'a> {
     // range start/end are really zscii values ie u8's
     // but we add and subtract them to/from indexes into the table
-    // so they're defined as usize's for convenience
+    // so they're declared as usize's for convenience
     const ZSCII_RANGE_START: usize = 155;
     const ZSCII_RANGE_END: usize = 251;
     // in units of u16
@@ -378,49 +423,18 @@ pub enum ZsciiError {
 
 pub type ZsciiResult<T> = Result<T, ZsciiError>;
 
-impl Zscii {
-    pub fn to_unicode(self, utt: UnicodeTransTable) -> ZsciiResult<char> {
-        let zb = self.0;
-        match zb {
-            0 => Ok('\0'),
-            8 => Err(ZsciiError::InputOnly(zb)), //delete
-            13 => Ok('\n'),
-            27 => Err(ZsciiError::InputOnly(zb)),        // esc
-            32..=126 => Ok(zb as char),                  // standard ascii
-            129..=154 => Err(ZsciiError::InputOnly(zb)), // arrow keys, function keys, keypad
-            155..=251 => utt
-                .zscii_to_unicode(self)
-                .ok_or(ZsciiError::UnicodeTransMissing(zb)),
-            253..=254 => Err(ZsciiError::InputOnly(zb)), // mouse click
-            _ => Err(ZsciiError::Undefined(zb)),
-        }
-    }
-}
-
 pub trait UnicodeFromZscii<'a> {
     type UnicodeIter: Iterator<Item = char>;
 
-    fn unicode(self, utt: UnicodeTransTable<'a>) -> Self::UnicodeIter;
+    fn to_unicode(self, utt: UnicodeTransTable<'a>) -> Self::UnicodeIter;
 }
 
 impl<'a, I: 'a + IntoIterator<Item = Zscii>> UnicodeFromZscii<'a> for I {
     type UnicodeIter = Box<dyn Iterator<Item = char> + 'a>;
 
-    fn unicode(self, utt: UnicodeTransTable<'a>) -> Self::UnicodeIter {
+    fn to_unicode(self, utt: UnicodeTransTable<'a>) -> Self::UnicodeIter {
         // TODO: log errors that occur during decoding
         Box::new(self.into_iter().filter_map(move |z| z.to_unicode(utt).ok()))
-    }
-}
-
-impl Zscii {
-    fn from_unicode(uni: char, utt: &UnicodeTransTable) -> Option<Zscii> {
-        match uni {
-            // "interpreting $60 as a grave accent is to be avoided."
-            '`' => Some(Zscii(b'\'')),
-            '\n' => Some(Zscii(0x0d)),
-            ' '..='~' => Some(Zscii(u8::try_from(uni as u32).unwrap())),
-            _ => utt.unicode_to_zscii(uni),
-        }
     }
 }
 
@@ -468,6 +482,106 @@ where
     }
 }
 
+// defining a trait to make this a nice adapter is too much effort
+fn zscii_to_zchars<'a>(
+    zscii_chars: impl Iterator<Item = Zscii> + 'a,
+    alph_table: AlphTable<'a>,
+) -> impl Iterator<Item = ZChar> + 'a {
+    ZsciiToZChars {
+        zscii_chars,
+        alph_table,
+        buf: Vec::new(),
+    }
+}
+
+fn zchars_to_textwords(zchars: impl Iterator<Item = ZChar>) -> impl Iterator<Item = TextWord> {
+    zchars
+        // append a bit of padding; tuples() will drop any extra
+        .chain(iter::repeat(ZChar::SHIFT_A2).take(2))
+        .tuples()
+        .peekable()
+        // batching() gives us access to peek() to know which element is the last
+        .batching(|iter| {
+            let (zc1, zc2, zc3) = iter.next()?;
+            let is_end = iter.peek().is_none();
+            Some(TextWord {
+                zchars: [zc1, zc2, zc3],
+                is_end,
+            })
+        })
+}
+
+pub trait ZTextDecodable<'a> {
+    type CharIter: Iterator<Item = char>;
+
+    fn decode_ztext(self, alph_table: AlphTable<'a>, utt: UnicodeTransTable<'a>) -> Self::CharIter;
+}
+
+impl<'a, I> ZTextDecodable<'a> for I
+where
+    I: 'a + IntoIterator<Item = u8>,
+{
+    // the type is actually static, not dynamic, but it's anonymous
+    // so I have to return a boxed trait object because rust is oppressive
+    // and doesn't allow "-> impl Trait" in trait methods
+    type CharIter = Box<dyn Iterator<Item = char> + 'a>;
+
+    fn decode_ztext(self, alph_table: AlphTable<'a>, utt: UnicodeTransTable<'a>) -> Self::CharIter {
+        let iter = self
+            .into_iter()
+            .zchars()
+            .zscii(alph_table)
+            // silently skip any invalid characters
+            .filter_map(move |z| z.to_unicode(utt).ok());
+        Box::new(iter)
+    }
+}
+
+pub trait ZTextEncodable<'a> {
+    type ByteIter: Iterator<Item = u8>;
+
+    fn encode_ztext(self, alph_table: AlphTable<'a>, utt: UnicodeTransTable<'a>) -> Self::ByteIter;
+}
+
+impl<'a, I> ZTextEncodable<'a> for I
+where
+    I: 'a + IntoIterator<Item = char>,
+{
+    type ByteIter = Box<dyn Iterator<Item = u8> + 'a>;
+
+    fn encode_ztext(self, alph_table: AlphTable<'a>, utt: UnicodeTransTable<'a>) -> Self::ByteIter {
+        // unicode -> Zscii
+        let iter = self
+            .into_iter()
+            .filter_map(move |c| Zscii::from_unicode(c, utt));
+        // Zscii -> ZChars
+        let iter = zscii_to_zchars(iter, alph_table);
+        // ZChars -> TextWords -> u16
+        let iter = zchars_to_textwords(iter).map_into::<u16>();
+        // u16 -> u8
+        let iter = util::words_to_bytes(iter);
+
+        Box::new(iter)
+    }
+}
+
+pub fn test() {
+    let text = "«dolor»";
+    let alph_table = AlphTable::Default;
+    let utt = UnicodeTransTable::Default;
+    let iter = text
+        .chars()
+        .filter_map(move |c| Zscii::from_unicode(c, utt));
+    let iter = zscii_to_zchars(iter, alph_table);
+    let iter = iter.zscii(alph_table);
+    // let iter = zchars_to_textwords(iter)
+    //     .map_into::<u16>();
+    // let iter = util::words_to_bytes(iter);
+
+    let result = iter.collect::<Vec<Zscii>>();
+    println!("{:?}", result);
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -476,7 +590,7 @@ mod tests {
     #[test]
     fn test_zchar_decode() {
         let text: Vec<u8> = vec![0x35, 0x51, 0xc6, 0x85, 0x77, 0xdf];
-        let mut zchar_iter = text.iter().zchars();
+        let mut zchar_iter = text.iter().copied().zchars();
         assert_eq!(zchar_iter.next().unwrap(), ZChar(0x0d));
         assert_eq!(zchar_iter.next().unwrap(), ZChar(0x0a));
         assert_eq!(zchar_iter.next().unwrap(), ZChar(0x11));
@@ -487,14 +601,61 @@ mod tests {
     }
 
     #[test]
-    fn test_zscii_decode() {
+    fn test_decode() {
         let text: Vec<u8> = vec![0x35, 0x51, 0xc6, 0x85, 0x77, 0xdf];
         let decoded: String = text
-            .zchars()
-            .zscii(AlphTable::Default)
-            .unicode(UnicodeTransTable::Default)
+            .decode_ztext(AlphTable::Default, UnicodeTransTable::Default)
             .collect();
         assert_eq!(decoded, "hello");
+    }
+
+    #[test]
+    fn test_round_trip() {
+        let text = "lorem Ipsum,\n«DOLOR» amet?";
+        let round_trip: String = text
+            .chars()
+            .encode_ztext(AlphTable::Default, UnicodeTransTable::Default)
+            .decode_ztext(AlphTable::Default, UnicodeTransTable::Default)
+            .collect();
+        assert_eq!(text, round_trip);
+    }
+
+    #[test]
+    fn test_round_trip_custom_tables() {
+        let utt = UnicodeTransTable::from_memory(&utt_vec_from_str("åëø"));
+        // TODO
+    }
+
+    #[test]
+    fn test_default_alph_table() {
+        let alph_table = AlphTable::Default;
+
+        assert_eq!(
+            alph_table.zchar_to_zscii(ZChar(22), Alph::A0).unwrap(),
+            Zscii(b'q')
+        );
+        assert_eq!(
+            alph_table.zscii_to_zchar(Zscii(b'q')).unwrap(),
+            (ZChar(22), Alph::A0)
+        );
+
+        assert_eq!(
+            alph_table.zchar_to_zscii(ZChar(22), Alph::A1).unwrap(),
+            Zscii(b'Q')
+        );
+        assert_eq!(
+            alph_table.zscii_to_zchar(Zscii(b'Q')).unwrap(),
+            (ZChar(22), Alph::A1)
+        );
+
+        assert_eq!(
+            alph_table.zchar_to_zscii(ZChar(22), Alph::A2).unwrap(),
+            Zscii(b'_')
+        );
+        assert_eq!(
+            alph_table.zscii_to_zchar(Zscii(b'_')).unwrap(),
+            (ZChar(22), Alph::A2)
+        );
     }
 
     #[test]
@@ -538,14 +699,9 @@ mod tests {
 
     // helper to construct custom UTT's
     fn utt_vec_from_str(utt_str: &str) -> Vec<u8> {
-        let high_byte_iter = utt_str
-            .encode_utf16()
-            .map(|w| u8::try_from(w >> 8).unwrap());
-        let low_byte_iter = utt_str
-            .encode_utf16()
-            .map(|w| u8::try_from(w & 0xff).unwrap());
+        let byte_iter = util::words_to_bytes(utt_str.encode_utf16());
         let mut utt_vec = iter::once(0)
-            .chain(high_byte_iter.interleave(low_byte_iter))
+            .chain(byte_iter)
             .collect::<Vec<u8>>();
         let len_words = (utt_vec.len() - 1) / 2;
         utt_vec[0] = u8::try_from(len_words).unwrap();
