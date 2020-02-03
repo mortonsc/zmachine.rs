@@ -126,55 +126,102 @@ impl<'a, I: IntoIterator<Item = &'a u8>> ZCharDecodable for I {
     }
 }
 
-#[derive(Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Alph {
     A0,
     A1,
     A2,
 }
 
-#[derive(Clone, Copy)]
-pub struct AlphTable<'a> {
-    rows: [&'a [u8; 26]; 3],
+#[derive(Debug, Clone, Copy)]
+pub enum AlphTable<'a> {
+    Default,
+    Custom(CustomAlphTable<'a>),
 }
 
+#[derive(Debug, Clone, Copy)]
+pub struct CustomAlphTable<'a> {
+    table: [&'a [u8; 26]; 3],
+}
+
+static DEFAULT_ALPH_TABLE: [&[u8; 26]; 3] = [
+    br#"abcdefghijklmnopqrstuvwxyz"#,
+    br#"ABCDEFGHIJKLMNOPQRSTUVWXYZ"#,
+    br#"XX0123456789.,!?_#'"/\-:()"#,
+];
+
 impl<'a> AlphTable<'a> {
-    pub fn new(raw_table: &'a [u8; 26 * 3]) -> AlphTable {
-        AlphTable {
-            rows: [
-                // rust requires try_into() but we know it will succeed
-                // because we select the right size with constant indices
-                raw_table[0..26].try_into().unwrap(),
-                raw_table[26..52].try_into().unwrap(),
-                raw_table[54..78].try_into().unwrap(),
-            ],
+    const ZCHAR_START: u8 = 6;
+
+    pub fn from_memory(bytes: &'a [u8]) -> Option<Self> {
+        if bytes.len() < (26 * 3) {
+            return None;
+        }
+        let table = [
+            // rust requires try_into() but we know it will succeed
+            // because we select the right size with constant indices
+            bytes[0..26].try_into().unwrap(),
+            bytes[26..52].try_into().unwrap(),
+            bytes[52..78].try_into().unwrap(),
+        ];
+        Some(AlphTable::Custom(CustomAlphTable { table }))
+    }
+
+    fn zchar_to_zscii(&self, zc: ZChar, alph: Alph) -> Option<Zscii> {
+        if zc.0 < Self::ZCHAR_START {
+            return None;
+        }
+        let index = (zc.0 - Self::ZCHAR_START) as usize;
+        let table = match self {
+            AlphTable::Default => DEFAULT_ALPH_TABLE,
+            AlphTable::Custom(CustomAlphTable { table }) => *table,
+        };
+        let zscii_byte = match (alph, index) {
+            (Alph::A0, _) => table[0][index],
+            (Alph::A1, _) => table[1][index],
+            (Alph::A2, 0) => return None, // compound char, can't handle here
+            (Alph::A2, 1) => Zscii::NEWLINE.0, // permanently mapped to newline
+            (Alph::A2, _) => table[2][index],
+        };
+        Some(Zscii(zscii_byte))
+    }
+
+    fn zscii_to_zchar(&self, zscii: Zscii) -> Option<(ZChar, Alph)> {
+        match self {
+            AlphTable::Default => Self::default_zscii_to_zchar(zscii),
+            AlphTable::Custom(at) => Self::custom_zscii_to_zchar(*at, zscii),
         }
     }
-}
 
-impl<'a> AlphTable<'a> {
-    fn lookup_zscii(&self, zc: ZChar, alph: Alph) -> Zscii {
-        const ZCHAR_MIN: u8 = 6;
-        assert!(ZCHAR_MIN <= zc.0);
-        let index = (zc.0 - ZCHAR_MIN) as usize;
-        let zscii_byte = match (alph, index) {
-            (Alph::A0, _) => self.rows[0][index],
-            (Alph::A1, _) => self.rows[1][index],
-            (Alph::A2, 0) => panic!(), // compound char; can't handle that here
-            (Alph::A2, 1) => b'\n',    // permanently mapped to newline
-            (Alph::A2, _) => self.rows[2][index],
+    fn default_zscii_to_zchar(zscii: Zscii) -> Option<(ZChar, Alph)> {
+        let Zscii(zb) = zscii;
+        match zb {
+            b'a'..=b'z' => Some((ZChar(zb - b'a' + Self::ZCHAR_START), Alph::A0)),
+            b'A'..=b'Z' => Some((ZChar(zb - b'A' + Self::ZCHAR_START), Alph::A1)),
+            _ => {
+                let idx = DEFAULT_ALPH_TABLE[2].iter().position(|&z| z == zb)?;
+                let zc = ZChar(u8::try_from(idx).unwrap() + Self::ZCHAR_START);
+                Some((zc, Alph::A2))
+            }
+        }
+    }
+
+    fn custom_zscii_to_zchar(at: CustomAlphTable, zscii: Zscii) -> Option<(ZChar, Alph)> {
+        let Zscii(zb) = zscii;
+        let (idx, alph) = if let Some(idx) = at.table[0].iter().position(|&z| z == zb) {
+            (idx, Alph::A0)
+        } else if let Some(idx) = at.table[1].iter().position(|&z| z == zb) {
+            (idx, Alph::A1)
+        } else if let Some(idx) = at.table[2][2..].iter().position(|&z| z == zb) {
+            // index is offset because we ignore the first 2 entries in the A2 row
+            (idx + 2, Alph::A2)
+        } else {
+            return None;
         };
-        Zscii(zscii_byte)
+        let zc = ZChar(u8::try_from(idx).unwrap() + Self::ZCHAR_START);
+        Some((zc, alph))
     }
 }
-
-pub static DEFAULT_ALPH_TABLE: AlphTable = AlphTable {
-    rows: [
-        br#"abcdefghijklmnopqrstuvwxyz"#,
-        br#"ABCDEFGHIJKLMNOPQRSTUVWXYZ"#,
-        br#"XX0123456789.,!?_#'"/\-:()"#,
-    ],
-};
 
 #[inline]
 fn composite_zscii(zc1: ZChar, zc2: ZChar) -> Zscii {
@@ -214,7 +261,8 @@ impl<'a, I: Iterator<Item = ZChar>> Iterator for ZsciiFromZChars<'a, I> {
                 self.next()?
             }
             (Alph::A2, 6) => composite_zscii(self.zchars.next()?, self.zchars.next()?),
-            (_, _) => self.alph_table.lookup_zscii(zc, self.alph),
+            (Alph::A2, 7) => Zscii::NEWLINE,
+            (_, _) => self.alph_table.zchar_to_zscii(zc, self.alph).unwrap(),
         };
         self.alph = Alph::A0;
         Some(zscii)
@@ -236,11 +284,11 @@ impl<'a, I: IntoIterator<Item = ZChar>> ZsciiDecodable<'a> for I {
 #[derive(Debug, Clone, Copy)]
 pub enum UnicodeTransTable<'a> {
     Default,
-    Custom(CustomUTT<'a>),
+    Custom(CustomUtt<'a>),
 }
 
 #[derive(Debug, Clone, Copy)]
-pub struct CustomUTT<'a> {
+pub struct CustomUtt<'a> {
     table: &'a [u8],
 }
 
@@ -270,20 +318,24 @@ impl<'a> UnicodeTransTable<'a> {
         if (len_w > 0) && (len_w <= Self::MAX_SIZE) {
             let len_b = 2 * len_w;
             let table = bytes.get(1..=len_b)?;
-            Some(UnicodeTransTable::Custom(CustomUTT { table }))
+            Some(UnicodeTransTable::Custom(CustomUtt { table }))
         } else {
             None
         }
     }
 
     pub fn zscii_to_unicode(&self, zscii: Zscii) -> Option<char> {
+        let zcodepoint = zscii.0 as usize;
+        if (zcodepoint < Self::ZSCII_RANGE_START) || (zcodepoint > Self::ZSCII_RANGE_END) {
+            return None;
+        }
         match self {
             UnicodeTransTable::Default => {
-                let index = (zscii.0 as usize) - Self::ZSCII_RANGE_START;
+                let index = zcodepoint - Self::ZSCII_RANGE_START;
                 DEFAULT_UTT.get(index).copied()
             }
             UnicodeTransTable::Custom(utt) => {
-                let index = 2 * ((zscii.0 as usize) - Self::ZSCII_RANGE_START);
+                let index = 2 * (zcodepoint - Self::ZSCII_RANGE_START);
                 let bytes = utt.table.get(index..=index + 1)?;
                 let scalar_val = u16::from_be_bytes([bytes[0], bytes[1]]);
                 char::try_from(scalar_val as u32).ok()
@@ -339,7 +391,7 @@ impl Zscii {
             155..=251 => utt
                 .zscii_to_unicode(self)
                 .ok_or(ZsciiError::UnicodeTransMissing(zb)),
-            254 => Err(ZsciiError::InputOnly(zb)), // mouse click
+            253..=254 => Err(ZsciiError::InputOnly(zb)), // mouse click
             _ => Err(ZsciiError::Undefined(zb)),
         }
     }
@@ -393,7 +445,7 @@ where
         } else if zscii == Zscii::NEWLINE {
             self.buf.push(ZChar::A2_NEWLINE);
             Some(ZChar::SHIFT_A2)
-        } else if let Some((zchar, alph)) = self.alph_table.find_zchar_trans(zscii) {
+        } else if let Some((zchar, alph)) = self.alph_table.zscii_to_zchar(zscii) {
             match alph {
                 Alph::A0 => Some(zchar),
                 Alph::A1 => {
@@ -412,20 +464,6 @@ where
             self.buf.push(high);
             self.buf.push(ZChar::A2_COMPOSITE_START);
             Some(ZChar::SHIFT_A2)
-        }
-    }
-}
-
-impl<'a> AlphTable<'a> {
-    fn find_zchar_trans(&self, zscii: Zscii) -> Option<(ZChar, Alph)> {
-        if let Some(idx) = self.rows[0].iter().position(|&z| z == zscii.0) {
-            Some((ZChar(u8::try_from(idx + 6).unwrap()), Alph::A0))
-        } else if let Some(idx) = self.rows[1].iter().position(|&z| z == zscii.0) {
-            Some((ZChar(u8::try_from(idx + 6).unwrap()), Alph::A1))
-        } else if let Some(idx) = self.rows[2][2..].iter().position(|&z| z == zscii.0) {
-            Some((ZChar(u8::try_from(idx + 6).unwrap()), Alph::A2))
-        } else {
-            None
         }
     }
 }
@@ -453,12 +491,52 @@ mod tests {
         let text: Vec<u8> = vec![0x35, 0x51, 0xc6, 0x85, 0x77, 0xdf];
         let decoded: String = text
             .zchars()
-            .zscii(DEFAULT_ALPH_TABLE)
+            .zscii(AlphTable::Default)
             .unicode(UnicodeTransTable::Default)
             .collect();
         assert_eq!(decoded, "hello");
     }
 
+    #[test]
+    fn test_custom_alph_table() {
+        let mut alph_table = vec![0u8; 26 * 3];
+        alph_table[0..26].copy_from_slice(DEFAULT_ALPH_TABLE[0]);
+        alph_table[26..52].copy_from_slice(DEFAULT_ALPH_TABLE[1]);
+        alph_table[52..78].copy_from_slice(DEFAULT_ALPH_TABLE[2]);
+        alph_table[4] = 170; // e -> é (using default UTT)
+        alph_table[26] = 202; // A -> Å
+        alph_table[77] = 162; // ) -> »
+        let alph_table = AlphTable::from_memory(&alph_table).unwrap();
+
+        assert_eq!(
+            alph_table.zchar_to_zscii(ZChar(10), Alph::A0).unwrap(),
+            Zscii(170)
+        );
+        assert_eq!(
+            alph_table.zscii_to_zchar(Zscii(170)).unwrap(),
+            (ZChar(10), Alph::A0)
+        );
+
+        assert_eq!(
+            alph_table.zchar_to_zscii(ZChar(6), Alph::A1).unwrap(),
+            Zscii(202)
+        );
+        assert_eq!(
+            alph_table.zscii_to_zchar(Zscii(202)).unwrap(),
+            (ZChar(6), Alph::A1)
+        );
+
+        assert_eq!(
+            alph_table.zchar_to_zscii(ZChar(31), Alph::A2).unwrap(),
+            Zscii(162)
+        );
+        assert_eq!(
+            alph_table.zscii_to_zchar(Zscii(162)).unwrap(),
+            (ZChar(31), Alph::A2)
+        );
+    }
+
+    // helper to construct custom UTT's
     fn utt_vec_from_str(utt_str: &str) -> Vec<u8> {
         let high_byte_iter = utt_str
             .encode_utf16()
@@ -475,7 +553,24 @@ mod tests {
     }
 
     #[test]
-    fn test_utt_basic() {
+    fn test_default_utt() {
+        let utt = UnicodeTransTable::Default;
+
+        assert_eq!(utt.zscii_to_unicode(Zscii(155)).unwrap(), 'ä');
+        assert_eq!(utt.unicode_to_zscii('ä').unwrap(), Zscii(155));
+
+        assert_eq!(utt.zscii_to_unicode(Zscii(191)).unwrap(), 'â');
+        assert_eq!(utt.unicode_to_zscii('â').unwrap(), Zscii(191));
+
+        assert_eq!(utt.zscii_to_unicode(Zscii(223)).unwrap(), '¿');
+        assert_eq!(utt.unicode_to_zscii('¿').unwrap(), Zscii(223));
+
+        assert!(utt.zscii_to_unicode(Zscii(154)).is_none());
+        assert!(utt.zscii_to_unicode(Zscii(224)).is_none());
+    }
+
+    #[test]
+    fn test_custom_utt() {
         let utt_vec = utt_vec_from_str("äëïöü");
         let utt = UnicodeTransTable::from_memory(&utt_vec).unwrap();
 
@@ -487,10 +582,16 @@ mod tests {
 
         assert_eq!(utt.zscii_to_unicode(Zscii(159)).unwrap(), 'ü');
         assert_eq!(utt.unicode_to_zscii('ü').unwrap(), Zscii(159));
+
+        assert!(utt.zscii_to_unicode(Zscii(154)).is_none());
+        assert!(utt.zscii_to_unicode(Zscii(160)).is_none());
+
+        assert!(utt.unicode_to_zscii('â').is_none());
     }
 
     #[test]
     fn test_utt_bounds() {
+        // test for off-by-one errors in the custom UTT code
         // construct a big UTT
         // starting point picked so that Zscii(251) translates to '~'
         let mut chars = 30u8..;
@@ -500,13 +601,14 @@ mod tests {
         let excessive_len = 1 + u8::try_from(UnicodeTransTable::MAX_SIZE).unwrap();
         let mut utt_vec = iter::once(excessive_len)
             .chain(zeroes.interleave(chars))
-            .take((2 * excessive_len) as usize)
+            .take(1 + (2 * (excessive_len as usize)))
             .collect::<Vec<u8>>();
         assert!(UnicodeTransTable::from_memory(&utt_vec).is_none());
 
         // now try just the right size
-        utt_vec[0] = excessive_len - 1;
         utt_vec.pop();
+        utt_vec.pop();
+        utt_vec[0] = excessive_len - 1;
         let utt = UnicodeTransTable::from_memory(&utt_vec).unwrap();
 
         assert_eq!(utt.zscii_to_unicode(Zscii(251)).unwrap(), '~');
