@@ -4,6 +4,8 @@ use std::iter;
 
 use crate::util;
 
+mod parse;
+
 // a ZChar is a 5-bit value
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ZChar(u8);
@@ -18,7 +20,7 @@ impl ZChar {
 
 // Zscii chars are nominally 10bit but only the bottom 8 are used
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct Zscii(u8);
+pub struct Zscii(pub u8);
 
 impl Zscii {
     const NEWLINE: Self = Zscii(13);
@@ -98,6 +100,11 @@ impl From<TextWord> for u16 {
     }
 }
 
+fn bytes_to_textwords<'a>(bytes: impl Iterator<Item = &'a u8>) -> impl Iterator<Item = TextWord> {
+    let words = util::bytes_to_words(bytes.copied());
+    words.map_into::<TextWord>()
+}
+
 pub struct ZCharsFromBytes<I> {
     text: I,
     current_word: Option<TextWord>,
@@ -162,6 +169,41 @@ impl<I: Iterator<Item = u8>> ZCharDecodable for I {
     }
 }
 
+pub enum Abbr<'a> {
+    Forbid,
+    Table(AbbrTable<'a>),
+}
+
+pub struct AbbrTable<'a> {
+    // three rows, each contains 32 addresses, each composed of 2 bytes
+    // looks complicated but makes indexing into the table really easy
+    table: [&'a [[u8; 2]; 32]; 3],
+    // abbr strings can be stored anywhere so we need to hold a ref to all of memory
+    memory: &'a [u8],
+}
+
+impl<'a> Abbr<'a> {
+    pub fn from_memory(memory: &'a [u8], addr: usize) -> Option<Self> {
+        let table_in_mem = memory.get(addr..)?;
+        let (_, table) = parse::abbr_table(table_in_mem).ok()?;
+        let abbr_table = AbbrTable { table, memory };
+        Some(Abbr::Table(abbr_table))
+    }
+
+    fn lookup_expansion(&self, zc1: ZChar, zc2: ZChar) -> Option<&'a [u8]> {
+        match self {
+            Self::Forbid => None,
+            Self::Table(abbr_table) => {
+                let row_idx = zc1.0 as usize;
+                assert!(row_idx < 3);
+                let col_idx = zc2.0 as usize;
+                let str_addr = u16::from_be_bytes(abbr_table.table[row_idx][col_idx]) as usize;
+                abbr_table.memory.get(str_addr..)
+            }
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Alph {
     A0,
@@ -190,17 +232,8 @@ impl<'a> AlphTable<'a> {
     const ZCHAR_START: u8 = 6;
 
     pub fn from_memory(bytes: &'a [u8]) -> Option<Self> {
-        if bytes.len() < (26 * 3) {
-            return None;
-        }
-        let table = [
-            // rust requires try_into() but we know it will succeed
-            // because we select the right size with constant indices
-            bytes[0..26].try_into().unwrap(),
-            bytes[26..52].try_into().unwrap(),
-            bytes[52..78].try_into().unwrap(),
-        ];
-        Some(AlphTable::Custom(CustomAlphTable { table }))
+        let (_, custom_alph_table) = parse::custom_alph_table(bytes).ok()?;
+        Some(AlphTable::Custom(custom_alph_table))
     }
 
     fn zchar_to_zscii(&self, zc: ZChar, alph: Alph) -> Option<Zscii> {
@@ -358,12 +391,9 @@ impl<'a> UnicodeTransTable<'a> {
     const MAX_SIZE: usize = Self::ZSCII_RANGE_END - Self::ZSCII_RANGE_START + 1;
 
     pub fn from_memory(bytes: &'a [u8]) -> Option<Self> {
-        // first byte contains length (in units of u16)
-        let len_w = *bytes.get(0)? as usize;
-        if (len_w > 0) && (len_w <= Self::MAX_SIZE) {
-            let len_b = 2 * len_w;
-            let table = bytes.get(1..=len_b)?;
-            Some(UnicodeTransTable::Custom(CustomUtt { table }))
+        let (_, custom_utt) = parse::custom_utt(bytes).ok()?;
+        if custom_utt.table.len() <= 2 * Self::MAX_SIZE {
+            Some(UnicodeTransTable::Custom(custom_utt))
         } else {
             None
         }
@@ -399,12 +429,8 @@ impl<'a> UnicodeTransTable<'a> {
             }
             UnicodeTransTable::Custom(utt) => {
                 let target = u16::try_from(unicode as u32).ok()?;
-                index = utt
-                    .table
-                    .iter()
-                    .tuples()
-                    .map(|(&high, &low)| u16::from_be_bytes([high, low]))
-                    .position(|dw| dw == target)?;
+                let mut codepoint_iter = util::bytes_to_words(utt.table.iter().copied());
+                index = codepoint_iter.position(|dw| dw == target)?;
             }
         }
         let byte = u8::try_from(index + Self::ZSCII_RANGE_START).unwrap();
@@ -700,9 +726,7 @@ mod tests {
     // helper to construct custom UTT's
     fn utt_vec_from_str(utt_str: &str) -> Vec<u8> {
         let byte_iter = util::words_to_bytes(utt_str.encode_utf16());
-        let mut utt_vec = iter::once(0)
-            .chain(byte_iter)
-            .collect::<Vec<u8>>();
+        let mut utt_vec = iter::once(0).chain(byte_iter).collect::<Vec<u8>>();
         let len_words = (utt_vec.len() - 1) / 2;
         utt_vec[0] = u8::try_from(len_words).unwrap();
         utt_vec
