@@ -306,6 +306,7 @@ pub enum ExtOpCode {
     CheckUnicode,
     SetTrueColor,
 
+    // V6 commands, don't support
     MoveWindow = 0x10,
     WindowSize,
     WindowStyle,

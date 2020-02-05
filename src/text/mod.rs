@@ -1,14 +1,17 @@
+use arrayvec::ArrayVec;
 use itertools::Itertools;
+use std::collections::VecDeque;
 use std::convert::{TryFrom, TryInto};
 use std::iter;
+use take_until::TakeUntilExt;
 
 use crate::util;
 
-mod parse;
+pub mod parse;
 
 // a ZChar is a 5-bit value
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct ZChar(u8);
+pub struct ZChar(pub u8);
 
 impl ZChar {
     const SPACE: Self = ZChar(0);
@@ -16,6 +19,63 @@ impl ZChar {
     const SHIFT_A2: Self = ZChar(5);
     const A2_COMPOSITE_START: Self = ZChar(6);
     const A2_NEWLINE: Self = ZChar(7);
+}
+
+#[derive(Debug, Clone)]
+struct TextWord {
+    zchars: ArrayVec<[ZChar; 3]>,
+    is_end: bool,
+}
+
+impl From<u16> for TextWord {
+    fn from(word: u16) -> TextWord {
+        let bitmask: u16 = 0x1f;
+        TextWord {
+            zchars: ArrayVec::from([
+                ZChar(((word >> 10) & bitmask) as u8),
+                ZChar(((word >> 5) & bitmask) as u8),
+                ZChar((word & bitmask) as u8),
+            ]),
+            is_end: (word >> 15) != 0,
+        }
+    }
+}
+
+impl From<TextWord> for u16 {
+    fn from(word: TextWord) -> u16 {
+        let text: u16 = word
+            .zchars
+            .iter()
+            .fold(0, |acc, zc| (acc << 5) | (zc.0 as u16));
+        if word.is_end {
+            text | (1 << 15)
+        } else {
+            text
+        }
+    }
+}
+
+pub struct ZStr<'a> {
+    contents: &'a [u8],
+}
+
+impl<'a> From<&'a [u8]> for ZStr<'a> {
+    fn from(contents: &'a [u8]) -> Self {
+        ZStr { contents }
+    }
+}
+
+impl<'a> ZStr<'a> {
+    #[must_use = "lazy iterator"]
+    fn zchars(self) -> impl Iterator<Item = ZChar> + 'a {
+        self.contents
+            .iter()
+            .tuples()
+            .map(|(&high, &low)| u16::from_be_bytes([high, low]))
+            .map_into::<TextWord>()
+            .take_until(|tw| tw.is_end)
+            .flat_map(|tw| tw.zchars.into_iter())
+    }
 }
 
 // Zscii chars are nominally 10bit but only the bottom 8 are used
@@ -66,140 +126,73 @@ impl Zscii {
     }
 }
 
-#[derive(Debug, Clone, Copy)]
-struct TextWord {
-    zchars: [ZChar; 3],
-    is_end: bool,
-}
-
-impl From<u16> for TextWord {
-    fn from(word: u16) -> TextWord {
-        let bitmask: u16 = 0x1f;
-        TextWord {
-            zchars: [
-                ZChar(((word >> 10) & bitmask) as u8),
-                ZChar(((word >> 5) & bitmask) as u8),
-                ZChar((word & bitmask) as u8),
-            ],
-            is_end: (word >> 15) != 0,
-        }
-    }
-}
-
-impl From<TextWord> for u16 {
-    fn from(word: TextWord) -> u16 {
-        let text: u16 = word
-            .zchars
-            .iter()
-            .fold(0, |acc, zc| (acc << 5) | (zc.0 as u16));
-        if word.is_end {
-            text | (1 << 15)
-        } else {
-            text
-        }
-    }
-}
-
-fn bytes_to_textwords<'a>(bytes: impl Iterator<Item = &'a u8>) -> impl Iterator<Item = TextWord> {
-    let words = util::bytes_to_words(bytes.copied());
-    words.map_into::<TextWord>()
-}
-
-pub struct ZCharsFromBytes<I> {
-    text: I,
-    current_word: Option<TextWord>,
-    index: usize,
-}
-
-impl<I: Iterator<Item = u8>> ZCharsFromBytes<I> {
-    fn new(iter: I) -> Self {
-        ZCharsFromBytes {
-            text: iter,
-            current_word: None,
-            index: 0,
-        }
-    }
-
-    fn next_word(&mut self) -> Option<TextWord> {
-        Some(TextWord::from(u16::from_be_bytes([
-            self.text.next()?,
-            self.text.next()?,
-        ])))
-    }
-}
-
-impl<I: Iterator<Item = u8>> Iterator for ZCharsFromBytes<I> {
-    type Item = ZChar;
-    fn next(&mut self) -> Option<Self::Item> {
-        if self.current_word.is_none() {
-            self.current_word = self.next_word();
-        }
-        let word = self.current_word?;
-        match self.index {
-            0..=2 => {
-                let zc = word.zchars[self.index];
-                self.index += 1;
-                Some(zc)
-            }
-            3 => {
-                if word.is_end {
-                    None
-                } else {
-                    self.current_word = None;
-                    self.index = 0;
-                    self.next()
-                }
-            }
-            _ => panic!(),
-        }
-    }
-}
-
-pub trait ZCharDecodable {
-    type ZCharIter: Iterator<Item = ZChar>;
-    fn zchars(self) -> Self::ZCharIter;
-}
-
-impl<I: Iterator<Item = u8>> ZCharDecodable for I {
-    type ZCharIter = ZCharsFromBytes<I>;
-
-    #[inline]
-    fn zchars(self) -> Self::ZCharIter {
-        ZCharsFromBytes::new(self)
-    }
-}
-
-pub enum Abbr<'a> {
-    Forbid,
-    Table(AbbrTable<'a>),
-}
-
+#[derive(Debug)]
 pub struct AbbrTable<'a> {
     // three rows, each contains 32 addresses, each composed of 2 bytes
     // looks complicated but makes indexing into the table really easy
-    table: [&'a [[u8; 2]; 32]; 3],
+    table: &'a [[[u8; 2]; 32]; 3],
     // abbr strings can be stored anywhere so we need to hold a ref to all of memory
     memory: &'a [u8],
 }
 
-impl<'a> Abbr<'a> {
+impl<'a> AbbrTable<'a> {
     pub fn from_memory(memory: &'a [u8], addr: usize) -> Option<Self> {
         let table_in_mem = memory.get(addr..)?;
         let (_, table) = parse::abbr_table(table_in_mem).ok()?;
-        let abbr_table = AbbrTable { table, memory };
-        Some(Abbr::Table(abbr_table))
+        Some(AbbrTable { table, memory })
     }
 
-    fn lookup_expansion(&self, zc1: ZChar, zc2: ZChar) -> Option<&'a [u8]> {
-        match self {
-            Self::Forbid => None,
-            Self::Table(abbr_table) => {
-                let row_idx = zc1.0 as usize;
-                assert!(row_idx < 3);
-                let col_idx = zc2.0 as usize;
-                let str_addr = u16::from_be_bytes(abbr_table.table[row_idx][col_idx]) as usize;
-                abbr_table.memory.get(str_addr..)
+    pub fn lookup_expansion(&self, zc1: ZChar, zc2: ZChar) -> Option<ZStr<'a>> {
+        let row_idx = (zc1.0 as usize) - 1;
+        assert!(row_idx < 3);
+        let col_idx = zc2.0 as usize;
+        let str_addr = u16::from_be_bytes(self.table[row_idx][col_idx]) as usize;
+        Some(ZStr::from(self.memory.get(str_addr..)?))
+    }
+}
+
+struct AbbrExpander<'a, I> {
+    zchar_iter: I,
+    abbr_table: AbbrTable<'a>,
+    abbr_buf: VecDeque<ZChar>,
+}
+
+impl<'a, I> AbbrExpander<'a, I> {
+    fn new(zchar_iter: I, abbr_table: AbbrTable<'a>) -> Self {
+        AbbrExpander {
+            zchar_iter,
+            abbr_table,
+            abbr_buf: VecDeque::new(),
+        }
+    }
+}
+
+// current implementation eagerly buffers the string that the abbr expands into
+// TODO: do this lazily if it can be done neatly
+impl<'a, I> Iterator for AbbrExpander<'a, I>
+where
+    I: Iterator<Item = ZChar>,
+{
+    type Item = ZChar;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        if !self.abbr_buf.is_empty() {
+            return self.abbr_buf.pop_front();
+        }
+
+        let zc = self.zchar_iter.next()?;
+        match zc {
+            ZChar(1) | ZChar(2) | ZChar(3) => {
+                let abbr_spec = self.zchar_iter.next()?;
+                if let Some(zstr) = self.abbr_table.lookup_expansion(zc, abbr_spec) {
+                    // TODO: log a warning/error if lookup_expansion() returns None
+                    // TODO: some validity checking on the result
+                    // ie, doesn't contain abbrs, doesn't end on incomplete multi-part char
+                    self.abbr_buf = zstr.zchars().collect();
+                }
+                self.next()
             }
+            _ => Some(zc),
         }
     }
 }
@@ -531,35 +524,23 @@ fn zchars_to_textwords(zchars: impl Iterator<Item = ZChar>) -> impl Iterator<Ite
             let (zc1, zc2, zc3) = iter.next()?;
             let is_end = iter.peek().is_none();
             Some(TextWord {
-                zchars: [zc1, zc2, zc3],
+                zchars: ArrayVec::from([zc1, zc2, zc3]),
                 is_end,
             })
         })
 }
 
-pub trait ZTextDecodable<'a> {
-    type CharIter: Iterator<Item = char>;
-
-    fn decode_ztext(self, alph_table: AlphTable<'a>, utt: UnicodeTransTable<'a>) -> Self::CharIter;
-}
-
-impl<'a, I> ZTextDecodable<'a> for I
-where
-    I: 'a + IntoIterator<Item = u8>,
-{
-    // the type is actually static, not dynamic, but it's anonymous
-    // so I have to return a boxed trait object because rust is oppressive
-    // and doesn't allow "-> impl Trait" in trait methods
-    type CharIter = Box<dyn Iterator<Item = char> + 'a>;
-
-    fn decode_ztext(self, alph_table: AlphTable<'a>, utt: UnicodeTransTable<'a>) -> Self::CharIter {
-        let iter = self
-            .into_iter()
-            .zchars()
+impl<'a> ZStr<'a> {
+    #[must_use = "lazy iterator"]
+    pub fn unicode_chars(
+        self,
+        alph_table: AlphTable<'a>,
+        utt: UnicodeTransTable<'a>,
+    ) -> impl Iterator<Item = char> + 'a {
+        self.zchars()
             .zscii(alph_table)
-            // silently skip any invalid characters
-            .filter_map(move |z| z.to_unicode(utt).ok());
-        Box::new(iter)
+            // TODO: log invalid characters instead of silently skipping
+            .filter_map(move |z| z.to_unicode(utt).ok())
     }
 }
 
@@ -616,7 +597,7 @@ mod tests {
     #[test]
     fn test_zchar_decode() {
         let text: Vec<u8> = vec![0x35, 0x51, 0xc6, 0x85, 0x77, 0xdf];
-        let mut zchar_iter = text.iter().copied().zchars();
+        let mut zchar_iter = ZStr::from(&text[..]).zchars();
         assert_eq!(zchar_iter.next().unwrap(), ZChar(0x0d));
         assert_eq!(zchar_iter.next().unwrap(), ZChar(0x0a));
         assert_eq!(zchar_iter.next().unwrap(), ZChar(0x11));
@@ -629,8 +610,8 @@ mod tests {
     #[test]
     fn test_decode() {
         let text: Vec<u8> = vec![0x35, 0x51, 0xc6, 0x85, 0x77, 0xdf];
-        let decoded: String = text
-            .decode_ztext(AlphTable::Default, UnicodeTransTable::Default)
+        let decoded: String = ZStr::from(&text[..])
+            .unicode_chars(AlphTable::Default, UnicodeTransTable::Default)
             .collect();
         assert_eq!(decoded, "hello");
     }
@@ -638,12 +619,14 @@ mod tests {
     #[test]
     fn test_round_trip() {
         let text = "lorem Ipsum,\n«DOLOR» amet?";
-        let round_trip: String = text
+        let encoded: Vec<u8> = text
             .chars()
             .encode_ztext(AlphTable::Default, UnicodeTransTable::Default)
-            .decode_ztext(AlphTable::Default, UnicodeTransTable::Default)
             .collect();
-        assert_eq!(text, round_trip);
+        let decoded: String = ZStr::from(&encoded[..])
+            .unicode_chars(AlphTable::Default, UnicodeTransTable::Default)
+            .collect();
+        assert_eq!(text, decoded);
     }
 
     #[test]
