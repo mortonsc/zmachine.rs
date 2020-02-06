@@ -1,6 +1,6 @@
 use crate::text::ZStr;
-use std::convert::TryInto;
 use std::cmp;
+use std::convert::TryInto;
 
 // layout of object table in memory:
 // [0..2]: default data for property 1
@@ -50,6 +50,22 @@ impl<'a> ObjectTable<'a> {
         }
     }
 
+    #[inline]
+    fn prop_id_to_default_addr(&self, prop_id: u8) -> usize {
+        let idx = (prop_id as usize) - 1;
+        self.default_prop_table_addr + (Property::DEFAULT_SIZE * idx)
+    }
+
+    pub fn get_default_prop_by_id(&'a self, prop_id: u8) -> Property<'a> {
+        let addr = self.prop_id_to_default_addr(prop_id);
+        let data = &self.memory[addr..=(addr + 1)];
+        Property {
+            data_addr: addr,
+            id: prop_id,
+            data,
+        }
+    }
+
     // try and figure out how many objects there
     // by assuming that a property table immediately follows the object table
     // method suggested by the zmachine spec
@@ -60,7 +76,7 @@ impl<'a> ObjectTable<'a> {
             if min_prop_addr < obj_addr {
                 return self.addr_to_object_id(min_prop_addr);
             }
-            let prop_addr = self.get_object_by_id(id).props_addr();
+            let prop_addr = self.get_object_by_id(id).prop_table_addr();
             if prop_addr < self.object_table_addr() {
                 continue;
             }
@@ -99,21 +115,61 @@ impl Object<'_> {
         u16::from_be_bytes([self.data[10], self.data[11]])
     }
 
-    fn props_addr(&self) -> usize {
+    pub fn get_short_name(&self) -> Option<ZStr> {
+        Some(self.get_prop_table()?.short_name)
+    }
+
+    pub fn get_prop_by_id(&self, prop_id: u8) -> Property {
+        let specific_prop = self
+            .get_prop_table()
+            .unwrap()
+            .into_iter()
+            // take advantage of the fact that the table is sorted
+            // (in descending order of id)
+            .skip_while(|p| p.id > prop_id)
+            .next();
+        match specific_prop {
+            Some(p) if p.id == prop_id => p,
+            _ => self.object_table.get_default_prop_by_id(prop_id),
+        }
+    }
+
+    // returns the first property in this object's property table
+    // (or None if the table is empty)
+    // never returns a default prop
+    // corresponds to `get_next_prop obj 0`
+    pub fn get_first_prop(&self) -> Option<Property> {
+        self.get_prop_table().unwrap().into_iter().next()
+    }
+
+    // returns the property of this object following the property with prop_id in the table
+    // unlike get_prop_by_id, this function never returns a default prop
+    // corresponds to `get_next_prop obj prop_id`
+    pub fn get_next_prop(&self, prop_id: u8) -> Option<Property> {
+        let mut props = self
+            .get_prop_table()
+            .unwrap()
+            .into_iter()
+            .skip_while(|p| p.id > prop_id);
+        let current_prop = props.next();
+        // "It is illegal to try to find the next property of a property
+        // "which does not exist, and an interpreter should halt with an error message
+        // "(if it can efficiently check this condition).
+        // TODO: use proper error handling
+        assert!(current_prop.unwrap().id == prop_id);
+        // None is a valid result; it means current_prop is the last one in the table
+        // `get_next_prop` returns 0 in this case
+        props.next()
+    }
+
+    fn prop_table_addr(&self) -> usize {
         u16::from_be_bytes([self.data[12], self.data[13]]) as usize
     }
 
-    pub fn get_short_name(&self) -> Option<ZStr> {
-        let addr = self.props_addr();
-        let len_words = *self.object_table.memory.get(addr)?;
-        let len_bytes = (2 * len_words) as usize;
-        let text = self
-            .object_table
-            .memory
-            .get((addr + 1)..(addr + 1 + len_bytes))?;
-        Some(ZStr::from(text))
+    #[inline]
+    fn get_prop_table(&self) -> Option<PropertyTable> {
+        PropertyTable::new(self.object_table.memory, self.prop_table_addr())
     }
-
 }
 
 // the data in a property consists of 1 to 64 unstructured bytes
@@ -131,21 +187,44 @@ impl Property<'_> {
     const MAX_NUM: usize = 63;
 }
 
+struct PropertyTable<'a> {
+    short_name: ZStr<'a>,
+    table_start_addr: usize,
+    memory: &'a [u8],
+}
+
+impl<'a> PropertyTable<'a> {
+    fn new(memory: &'a [u8], addr: usize) -> Option<Self> {
+        let name_len_words = *memory.get(addr)?;
+        let name_len_bytes = 2 * (name_len_words as usize);
+        let table_start_addr = addr + 1 + name_len_bytes;
+        let name_text = memory.get((addr + 1)..table_start_addr)?;
+        let short_name = ZStr::from(name_text);
+        Some(PropertyTable {
+            short_name,
+            table_start_addr,
+            memory,
+        })
+    }
+}
+
+impl<'a> IntoIterator for PropertyTable<'a> {
+    type Item = Property<'a>;
+    type IntoIter = PropertyTableIterator<'a>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        PropertyTableIterator {
+            addr: self.table_start_addr,
+            last_id: 0xff,
+            memory: self.memory,
+        }
+    }
+}
+
 struct PropertyTableIterator<'a> {
     addr: usize,
     last_id: u8,
     memory: &'a [u8],
-}
-
-impl<'a> PropertyTableIterator<'a> {
-    #[inline]
-    fn new(memory: &'a [u8], addr: usize) -> Self {
-        PropertyTableIterator {
-            addr,
-            last_id: 0xff,
-            memory,
-        }
-    }
 }
 
 impl<'a> Iterator for PropertyTableIterator<'a> {
@@ -214,6 +293,5 @@ pub fn dump_objs(memory: &[u8]) {
             .unicode_chars(AlphTable::Default, UnicodeTransTable::Default)
             .collect::<String>();
         println!("{}", name);
-
     }
 }
