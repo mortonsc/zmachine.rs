@@ -1,2 +1,4 @@
+main
+*.qzl
 /target
 **/*.rs.bk

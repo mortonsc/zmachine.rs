@@ -69,9 +69,8 @@ impl<'a> ZStr<'a> {
     #[must_use = "lazy iterator"]
     fn zchars(self) -> impl Iterator<Item = ZChar> + 'a {
         self.contents
-            .iter()
-            .tuples()
-            .map(|(&high, &low)| u16::from_be_bytes([high, low]))
+            .chunks_exact(2)
+            .map(|pair| u16::from_be_bytes([pair[0], pair[1]]))
             .map_into::<TextWord>()
             .take_until(|tw| tw.is_end)
             .flat_map(|tw| tw.zchars.into_iter())

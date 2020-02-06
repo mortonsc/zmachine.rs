@@ -6,6 +6,7 @@ extern crate enum_primitive;
 mod instr;
 mod dict;
 mod text;
+mod object;
 mod util;
 
 use std::fs::File;
@@ -13,11 +14,7 @@ use std::io::prelude::*;
 
 use text::{AlphTable, UnicodeTransTable, AbbrTable, ZChar, ZStr};
 
-fn dump_dictionary() {
-    let mut f = File::open("assets/castles.z5").unwrap();
-    let mut src = Vec::new();
-    f.read_to_end(&mut src).unwrap();
-
+fn dump_dictionary(src: &[u8]) {
     let table_addr = u16::from_be_bytes([src[8], src[9]]) as usize;
     let (_, dict_table) = dict::parse::dict_table(&src[table_addr..]).unwrap();
 
@@ -51,5 +48,9 @@ fn dump_abbrs() {
 }
 
 fn main() {
-    dump_abbrs();
+    let mut f = File::open("assets/AllRoads.z5").unwrap();
+    let mut src = Vec::new();
+    f.read_to_end(&mut src).unwrap();
+
+    object::dump_objs(&src);
 }
