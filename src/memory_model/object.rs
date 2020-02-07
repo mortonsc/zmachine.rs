@@ -35,7 +35,7 @@ impl<'a> ObjectTable<'a> {
         (byteaddr - self.table.byteaddr()) / Object::SIZE
     }
 
-    pub fn get_object_by_id(&'a self, id: u16) -> Object<'a> {
+    pub fn by_id(&'a self, id: u16) -> Object<'a> {
         let start = (id * Object::SIZE) as usize;
         let end = start + (Object::SIZE as usize);
         let data = self.table.get_subslice(start, end);
@@ -56,7 +56,7 @@ impl<'a> ObjectTable<'a> {
             if min_prop_addr < obj_addr {
                 return self.byteaddr_to_object_id(min_prop_addr);
             }
-            let prop_addr = self.get_object_by_id(id).prop_table_byteaddr();
+            let prop_addr = self.by_id(id).prop_table_byteaddr();
             if prop_addr < self.table.byteaddr() {
                 continue;
             }
@@ -103,52 +103,8 @@ impl<'a> Object<'a> {
         self.data.get_word(12)
     }
 
-    pub fn get_short_name(self) -> Option<ZStr<'a>> {
-        Some(self.get_prop_table().short_name)
-    }
-
-    pub fn get_prop_by_id(self, prop_id: u8) -> Property<'a> {
-        let specific_prop = self
-            .get_prop_table()
-            .into_iter()
-            // take advantage of the fact that the table is sorted
-            // (in descending order of id)
-            .skip_while(|p| p.id > prop_id)
-            .next();
-        match specific_prop {
-            Some(p) if p.id == prop_id => p,
-            _ => self.mm.default_prop_table().get_prop_by_id(prop_id),
-        }
-    }
-
-    // returns the first property in this object's property table
-    // (or None if the table is empty)
-    // never returns a default prop
-    // corresponds to `get_next_prop obj 0`
-    pub fn get_first_prop(self) -> Option<Property<'a>> {
-        self.get_prop_table().into_iter().next()
-    }
-
-    // returns the property of this object following the property with prop_id in the table
-    // unlike get_prop_by_id, this function never returns a default prop
-    // corresponds to `get_next_prop obj prop_id`
-    pub fn get_next_prop(self, prop_id: u8) -> Option<Property<'a>> {
-        let mut props = self
-            .get_prop_table()
-            .into_iter()
-            .skip_while(|p| p.id > prop_id);
-        let current_prop = props.next();
-        // "It is illegal to try to find the next property of a property
-        // "which does not exist, and an interpreter should halt with an error message
-        // "(if it can efficiently check this condition).
-        assert!(current_prop.unwrap().id == prop_id);
-        // None is a valid result; it means current_prop is the last one in the table
-        // `get_next_prop` will return 0 in this case
-        props.next()
-    }
-
     #[inline]
-    fn get_prop_table(self) -> PropertyTable<'a> {
+    pub fn properties(self) -> PropertyTable<'a> {
         PropertyTable::new(self.mm, self.prop_table_byteaddr())
     }
 }
@@ -183,7 +139,7 @@ impl<'a> DefaultPropertyTable<'a> {
         }
     }
 
-    fn get_prop_by_id(self, id: u8) -> Property<'a> {
+    pub fn by_id(self, id: u8) -> Property<'a> {
         let offset = Property::DEFAULT_SIZE * ((id - Property::MIN_ID) as usize);
         Property {
             id,
@@ -196,6 +152,7 @@ impl<'a> DefaultPropertyTable<'a> {
 pub struct PropertyTable<'a> {
     short_name: ZStr<'a>,
     table: MemorySlice<'a>,
+    mm: MemoryModel<'a>,
 }
 
 impl<'a> PropertyTable<'a> {
@@ -205,7 +162,65 @@ impl<'a> PropertyTable<'a> {
         let name_len_bytes = 2 * (name_len_words as usize);
         let (table, short_name) = table.take_n_bytes(name_len_bytes);
         let short_name = ZStr::from(short_name);
-        PropertyTable { short_name, table }
+        PropertyTable {
+            short_name,
+            table,
+            mm,
+        }
+    }
+
+    pub fn first(self) -> Option<Property<'a>> {
+        self.into_iter().next()
+    }
+
+    pub fn by_id(self, id: u8) -> Option<Property<'a>> {
+        self.into_iter()
+            // take advantage of the fact that the table is sorted
+            // (in descending order of id)
+            .take_while(|p| p.id >= id)
+            .find(|p| p.id == id)
+    }
+
+    pub fn by_id_with_default(self, id: u8) -> Property<'a> {
+        self.by_id(id)
+            .unwrap_or_else(|| self.mm.default_prop_table().by_id(id))
+    }
+
+    pub fn next_after_id(self, id: u8) -> Option<Property<'a>> {
+        let mut iter = self.into_iter().skip_while(|p| p.id > id);
+        let current_prop = iter.next();
+        // "It is illegal to try to find the next property of a property
+        // "which does not exist, and an interpreter should halt with an error message
+        // "(if it can efficiently check this condition).
+        assert!(current_prop.unwrap().id == id);
+        // None is a valid result; it means current_prop is the last one in the table
+        iter.next()
+    }
+
+    // returns the property whose memory begins at the given address
+    // TODO: really shouldn't be an instance method of PropertyTable
+    // spec for `get prop_len property_address` says
+    // "It is illegal to try to find the property length of a property
+    // "which does not exist for the given object, and an interpreter
+    // "should halt with an error message
+    // "(if it can efficiently check this condition). 
+    //  which is incomprehensible since the instruction by itself
+    //  contains no reference to an object
+    //  although in practice it's used along with `get prop_addr object property`
+    pub fn by_byteaddr(self, byteaddr: u16) -> Property<'a> {
+        let memory = self.mm.memory();
+        let addr = byteaddr as usize;
+        let byte_neg1 = memory.get_byte(addr - 1);
+        let (id, data_len) = if (byte_neg1 & 0x80) != 0 {
+            //two-byte header, and this is the second byte
+            let byte_neg2 = memory.get_byte(addr - 2);
+            parse_2byte_prop_header(byte_neg2, byte_neg1)
+        } else {
+            //one-byte header
+            parse_1byte_prop_header(byte_neg1)
+        };
+        let data = memory.get_subslice(addr, addr + data_len);
+        Property { id, data }
     }
 }
 
@@ -294,10 +309,10 @@ pub fn dump_objs(mm: &MemoryModel) {
     let num = object_table.guess_max_id();
 
     for id in 0..num {
-        let obj = object_table.get_object_by_id(id);
+        let obj = object_table.by_id(id);
         let name = obj
-            .get_short_name()
-            .unwrap()
+            .properties()
+            .short_name
             .unicode_chars(AlphTable::Default, UnicodeTransTable::Default)
             .collect::<String>();
         println!("{}", name);
