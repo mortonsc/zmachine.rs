@@ -55,6 +55,8 @@ impl From<TextWord> for u16 {
     }
 }
 
+
+#[derive(Debug, Clone, Copy)]
 pub struct ZStr<'a> {
     contents: &'a [u8],
 }

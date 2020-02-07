@@ -6,12 +6,13 @@ extern crate enum_primitive;
 mod instr;
 mod dict;
 mod text;
-mod object;
+mod memory_model;
 mod util;
 
 use std::fs::File;
 use std::io::prelude::*;
 
+use memory_model::MemoryModel;
 use text::{AlphTable, UnicodeTransTable, AbbrTable, ZChar, ZStr};
 
 fn dump_dictionary(src: &[u8]) {
@@ -51,6 +52,7 @@ fn main() {
     let mut f = File::open("assets/AllRoads.z5").unwrap();
     let mut src = Vec::new();
     f.read_to_end(&mut src).unwrap();
+    let mm = MemoryModel::from_src(&src);
 
-    object::dump_objs(&src);
+    memory_model::dump_objs(&mm);
 }
