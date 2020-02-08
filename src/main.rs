@@ -1,19 +1,19 @@
 use std::fs::File;
 use std::io::prelude::*;
 
-use zmachine::text::{AbbrTable, AlphTable, UnicodeTransTable, ZChar, ZStr};
-use zmachine::{MemoryModel, Object, ObjectTable};
+use zmachine::text::{AbbrTable, AlphTable, UnicodeTransTable, ZChar, ZStr, ZTextEncodable};
+use zmachine::{Dictionary, MemoryModel, Object, ObjectTable};
 
-fn dump_dictionary(src: &[u8]) {
-    let table_addr = u16::from_be_bytes([src[8], src[9]]) as usize;
-    let (_, dict_table) = zmachine::dict::parse::dict_table(&src[table_addr..]).unwrap();
-
-    println!("word separators: {:?}", dict_table.word_seps);
-    for entry in dict_table.entries {
-        let headword = ZStr::from(&entry.word[..])
+fn dump_dictionary(dict: Dictionary) {
+    println!("word separators: {:?}", dict.word_seps);
+    let len = dict.len() as u16;
+    for idx in 0..len {
+        let entry = dict.by_index(idx);
+        let headword = entry
+            .key()
             .unicode_chars(AlphTable::Default, UnicodeTransTable::Default)
             .collect::<String>();
-        println!("{}: {:?}", headword, entry.data);
+        println!("{}", headword);
     }
 }
 
@@ -84,5 +84,18 @@ fn main() {
     f.read_to_end(&mut src).unwrap();
     let mm = MemoryModel::from_src(&src);
 
-    dump_objs_rec(mm.objects());
+    let key = "resistance"
+        .chars()
+        .encode_ztext(AlphTable::Default, UnicodeTransTable::Default)
+        .collect::<Vec<_>>();
+    let key = ZStr::from(&key[..]).zchars();
+    let entry = mm.dictionary().by_key(key).unwrap();
+    let headword = entry
+        .key()
+        .unicode_chars(AlphTable::Default, UnicodeTransTable::Default)
+        .collect::<String>();
+    println!("{}", headword);
+
+    // dump_objs_rec(mm.objects());
+    // dump_dictionary(mm.dictionary());
 }

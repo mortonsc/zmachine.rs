@@ -207,13 +207,18 @@ impl<'a> Iterator for ChildObjectIterator<'a> {
 #[derive(Debug, Clone, Copy)]
 pub struct Property<'a> {
     pub id: u8,
-    pub data: MemorySlice<'a>,
+    data: MemorySlice<'a>,
 }
 
-impl Property<'_> {
+impl<'a> Property<'a> {
     pub const MIN_ID: u8 = 1;
     pub const MAX_ID: u8 = 63;
     const DEFAULT_SIZE: usize = 2;
+
+    #[inline]
+    pub fn data(self) -> MemorySlice<'a> {
+        self.data
+    }
 }
 
 #[derive(Debug, Clone, Copy)]

@@ -3,9 +3,11 @@ use itertools::Itertools;
 use std::collections::VecDeque;
 use std::convert::{TryFrom, TryInto};
 use std::iter;
+use std::ops::Deref;
 use take_until::TakeUntilExt;
 
 use crate::util;
+use crate::Dictionary;
 
 pub mod parse;
 
@@ -14,17 +16,17 @@ pub mod parse;
 pub struct ZChar(pub u8);
 
 impl ZChar {
-    const SPACE: Self = ZChar(0);
-    const SHIFT_A1: Self = ZChar(4);
-    const SHIFT_A2: Self = ZChar(5);
-    const A2_COMPOSITE_START: Self = ZChar(6);
-    const A2_NEWLINE: Self = ZChar(7);
+    pub const SPACE: Self = ZChar(0);
+    pub const SHIFT_A1: Self = ZChar(4);
+    pub const SHIFT_A2: Self = ZChar(5);
+    pub const A2_COMPOSITE_START: Self = ZChar(6);
+    pub const A2_NEWLINE: Self = ZChar(7);
 }
 
 #[derive(Debug, Clone)]
-struct TextWord {
-    zchars: ArrayVec<[ZChar; 3]>,
-    is_end: bool,
+pub struct TextWord {
+    pub zchars: ArrayVec<[ZChar; 3]>,
+    pub is_end: bool,
 }
 
 impl From<u16> for TextWord {
@@ -55,8 +57,7 @@ impl From<TextWord> for u16 {
     }
 }
 
-
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub struct ZStr<'a> {
     contents: &'a [u8],
 }
@@ -67,9 +68,17 @@ impl<'a> From<&'a [u8]> for ZStr<'a> {
     }
 }
 
+impl Deref for ZStr<'_> {
+    type Target = [u8];
+
+    fn deref(&self) -> &Self::Target {
+        self.contents
+    }
+}
+
 impl<'a> ZStr<'a> {
     #[must_use = "lazy iterator"]
-    fn zchars(self) -> impl Iterator<Item = ZChar> + 'a {
+    pub fn zchars(self) -> impl Iterator<Item = ZChar> + 'a {
         self.contents
             .chunks_exact(2)
             .map(|pair| u16::from_be_bytes([pair[0], pair[1]]))
@@ -571,6 +580,14 @@ where
 
         Box::new(iter)
     }
+}
+
+pub fn zchars_to_dict_key(zchars: impl Iterator<Item = ZChar>) -> Vec<u8> {
+    let padding = iter::once(ZChar::SHIFT_A2).cycle();
+    let iter = zchars.chain(padding).take(3 * Dictionary::KEY_SIZE / 2);
+    let iter = zchars_to_textwords(iter).map_into::<u16>();
+    let iter = util::words_to_bytes(iter);
+    iter.collect()
 }
 
 pub fn test() {
