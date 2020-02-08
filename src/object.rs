@@ -4,10 +4,10 @@ use std::cmp;
 use super::{MemoryModel, MemorySlice};
 
 // layout of object table in memory:
-// [0..14]: object 0
-// [14..28] object 1
+// [0..14]: object 1
+// [14..28] object 2
 // ...
-// [14n..14(n+1)]: object n
+// [14(n-1)..14n)]: object n
 // the end of the table is not marked in any explicit way.
 // (Actually, the Z-Machine spec includes the default property table as part of the object table.
 // But they have nothing in common aside from being contiguous in memory.)
@@ -35,8 +35,9 @@ impl<'a> ObjectTable<'a> {
         (byteaddr - self.table.byteaddr()) / Object::SIZE
     }
 
-    pub fn by_id(&'a self, id: u16) -> Object<'a> {
-        let start = (id * Object::SIZE) as usize;
+    pub fn by_id(self, id: u16) -> Object<'a> {
+        let index = (id - 1) as usize;
+        let start = index * (Object::SIZE as usize);
         let end = start + (Object::SIZE as usize);
         let data = self.table.get_subslice(start, end);
         Object {
@@ -49,9 +50,9 @@ impl<'a> ObjectTable<'a> {
     // try and figure out how many objects there
     // by assuming that a property table immediately follows the object table
     // method suggested by the zmachine spec
-    fn guess_max_id(self) -> u16 {
+    pub fn guess_max_id(self) -> u16 {
         let mut min_prop_addr = std::u16::MAX;
-        for id in 0..=std::u16::MAX {
+        for id in 1..=std::u16::MAX {
             let obj_addr = self.object_id_to_byteaddr(id);
             if min_prop_addr < obj_addr {
                 return self.byteaddr_to_object_id(min_prop_addr);
@@ -64,6 +65,44 @@ impl<'a> ObjectTable<'a> {
         }
         // failure
         panic!();
+    }
+}
+
+pub struct ObjectIterator<'a> {
+    objects: ObjectTable<'a>,
+    next_id: u16,
+    table_lower_bound: u16,
+}
+
+impl<'a> IntoIterator for ObjectTable<'a> {
+    type Item = Object<'a>;
+    type IntoIter = ObjectIterator<'a>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        ObjectIterator {
+            objects: self,
+            next_id: 1,
+            table_lower_bound: u16::max_value(),
+        }
+    }
+}
+
+impl<'a> Iterator for ObjectIterator<'a> {
+    type Item = Object<'a>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        let obj = self.objects.by_id(self.next_id);
+        if obj.data.byteaddr() >= self.table_lower_bound {
+            return None;
+        }
+
+        let prop_addr = obj.prop_table_byteaddr();
+        if prop_addr > self.objects.table.byteaddr() {
+            self.table_lower_bound = cmp::min(prop_addr, self.table_lower_bound);
+        }
+        self.next_id += 1;
+
+        Some(obj)
     }
 }
 
@@ -103,9 +142,64 @@ impl<'a> Object<'a> {
         self.data.get_word(12)
     }
 
+    pub fn parent(self) -> Option<Object<'a>> {
+        let parent_id = self.parent_id();
+        if parent_id == 0 {
+            None
+        } else {
+            Some(self.mm.objects().by_id(parent_id))
+        }
+    }
+
+    pub fn sibling(self) -> Option<Object<'a>> {
+        let sibling_id = self.sibling_id();
+        if sibling_id == 0 {
+            None
+        } else {
+            Some(self.mm.objects().by_id(sibling_id))
+        }
+    }
+
+    pub fn child(self) -> Option<Object<'a>> {
+        let child_id = self.child_id();
+        if child_id == 0 {
+            None
+        } else {
+            Some(self.mm.objects().by_id(child_id))
+        }
+    }
+
+    #[inline]
+    pub fn children(self) -> impl Iterator<Item = Object<'a>> {
+        ChildObjectIterator {
+            next_child: self.child(),
+        }
+    }
+
     #[inline]
     pub fn properties(self) -> PropertyTable<'a> {
         PropertyTable::new(self.mm, self.prop_table_byteaddr())
+    }
+
+    #[inline]
+    pub fn short_name(self) -> ZStr<'a> {
+        self.properties().short_name
+    }
+}
+
+struct ChildObjectIterator<'a> {
+    next_child: Option<Object<'a>>,
+}
+
+impl<'a> Iterator for ChildObjectIterator<'a> {
+    type Item = Object<'a>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        let ret = self.next_child;
+        if let Some(obj) = self.next_child {
+            self.next_child = obj.sibling();
+        }
+        ret
     }
 }
 
@@ -183,7 +277,7 @@ impl<'a> PropertyTable<'a> {
 
     pub fn by_id_with_default(self, id: u8) -> Property<'a> {
         self.by_id(id)
-            .unwrap_or_else(|| self.mm.default_prop_table().by_id(id))
+            .unwrap_or_else(|| self.mm.default_properties().by_id(id))
     }
 
     pub fn next_after_id(self, id: u8) -> Option<Property<'a>> {
@@ -203,7 +297,7 @@ impl<'a> PropertyTable<'a> {
     // "It is illegal to try to find the property length of a property
     // "which does not exist for the given object, and an interpreter
     // "should halt with an error message
-    // "(if it can efficiently check this condition). 
+    // "(if it can efficiently check this condition).
     //  which is incomprehensible since the instruction by itself
     //  contains no reference to an object
     //  although in practice it's used along with `get prop_addr object property`
@@ -298,23 +392,5 @@ impl<'a> Iterator for PropertyTableIterator<'a> {
         self.table = table;
 
         Some(prop)
-    }
-}
-
-use crate::text::{AlphTable, UnicodeTransTable};
-
-pub fn dump_objs(mm: &MemoryModel) {
-    let object_table = mm.object_table();
-
-    let num = object_table.guess_max_id();
-
-    for id in 0..num {
-        let obj = object_table.by_id(id);
-        let name = obj
-            .properties()
-            .short_name
-            .unicode_chars(AlphTable::Default, UnicodeTransTable::Default)
-            .collect::<String>();
-        println!("{}", name);
     }
 }

@@ -1,9 +1,8 @@
-use std::mem;
 use nom;
-use nom::IResult;
 use nom::bytes::complete::take;
-use nom::number::complete::{be_u8, be_u16};
-use nom::combinator::map_res;
+use nom::number::complete::be_u8;
+use nom::IResult;
+use std::mem;
 
 use super::*;
 
@@ -30,7 +29,7 @@ pub fn custom_alph_table(input: &[u8]) -> IResult<&[u8], CustomAlphTable> {
             row_a0.try_into().unwrap(),
             row_a1.try_into().unwrap(),
             row_a2.try_into().unwrap(),
-        ]
+        ],
     };
     Ok((input, custom_alph_table))
 }

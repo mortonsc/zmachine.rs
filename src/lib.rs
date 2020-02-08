@@ -1,8 +1,17 @@
-mod object;
+#[macro_use]
+extern crate lazy_static;
+#[macro_use]
+extern crate enum_primitive;
 
-pub use object::{dump_objs, DefaultPropertyTable, Object, ObjectTable, Property, PropertyTable};
+pub mod dict;
+pub mod instr;
+pub mod object;
+pub mod text;
+mod util;
 
-use crate::text::ZStr;
+pub use object::{DefaultPropertyTable, Object, ObjectTable, Property, PropertyTable};
+
+use text::ZStr;
 
 #[derive(Debug, Clone, Copy)]
 pub struct MemoryModel<'a> {
@@ -24,14 +33,14 @@ impl<'a> MemoryModel<'a> {
     }
 
     #[inline]
-    pub fn object_table(self) -> ObjectTable<'a> {
+    pub fn objects(self) -> ObjectTable<'a> {
         // object table is located immediately after the default prop table in memory
         let byteaddr = self.memory().get_word(0xa) + (DefaultPropertyTable::SIZE as u16);
         ObjectTable::new(self, byteaddr)
     }
 
     #[inline]
-    pub fn default_prop_table(self) -> DefaultPropertyTable<'a> {
+    pub fn default_properties(self) -> DefaultPropertyTable<'a> {
         let byteaddr = self.memory().get_word(0xa);
         DefaultPropertyTable::new(self, byteaddr)
     }
@@ -49,6 +58,11 @@ impl<'a> MemorySlice<'a> {
     #[inline]
     pub fn len(self) -> usize {
         self.contents.len()
+    }
+
+    #[inline]
+    pub fn as_slice(self) -> &'a [u8] {
+        self.contents
     }
 
     // returns the byteaddr of the beginning of this slice
@@ -151,5 +165,3 @@ impl<'a> From<MemorySlice<'a>> for ZStr<'a> {
         ZStr::from(ms.contents)
     }
 }
-
-
