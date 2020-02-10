@@ -1,7 +1,7 @@
 use crate::text::ZStr;
 use std::cmp;
 
-use super::{MemoryModel, MemorySlice};
+use super::{MemorySlice, MemoryWrite, ZMachineState};
 
 // layout of object table in memory:
 // [0..14]: object 1
@@ -14,14 +14,14 @@ use super::{MemoryModel, MemorySlice};
 #[derive(Debug, Clone, Copy)]
 pub struct ObjectTable<'a> {
     table: MemorySlice<'a>,
-    mm: MemoryModel<'a>,
+    zm: ZMachineState<'a>,
 }
 
 impl<'a> ObjectTable<'a> {
     #[inline]
-    pub(super) fn new(mm: MemoryModel<'a>, byteaddr: u16) -> Self {
-        let table = mm.memory().get_subslice_unbounded(byteaddr as usize);
-        ObjectTable { mm, table }
+    pub(super) fn new(zm: ZMachineState<'a>, byteaddr: u16) -> Self {
+        let table = zm.memory().get_subslice_unbounded(byteaddr as usize);
+        ObjectTable { zm, table }
     }
 
     #[inline]
@@ -43,7 +43,7 @@ impl<'a> ObjectTable<'a> {
         Object {
             id,
             data,
-            mm: self.mm,
+            zm: self.zm,
         }
     }
 
@@ -116,30 +116,34 @@ impl<'a> Iterator for ObjectIterator<'a> {
 pub struct Object<'a> {
     pub id: u16,
     data: MemorySlice<'a>,
-    mm: MemoryModel<'a>,
+    zm: ZMachineState<'a>,
 }
 
 impl<'a> Object<'a> {
     const SIZE: u16 = 14;
+    const PARENT_ID_OFFSET: usize = 6;
+    const SIBLING_ID_OFFSET: usize = 8;
+    const CHILD_ID_OFFSET: usize = 10;
+    const PROP_TABLE_OFFSET: usize = 12;
 
     #[inline]
     pub fn parent_id(self) -> u16 {
-        self.data.get_word(6)
+        self.data.get_word(Self::PARENT_ID_OFFSET)
     }
 
     #[inline]
     pub fn sibling_id(self) -> u16 {
-        self.data.get_word(8)
+        self.data.get_word(Self::SIBLING_ID_OFFSET)
     }
 
     #[inline]
     pub fn child_id(self) -> u16 {
-        self.data.get_word(10)
+        self.data.get_word(Self::CHILD_ID_OFFSET)
     }
 
     #[inline]
     fn prop_table_byteaddr(self) -> u16 {
-        self.data.get_word(12)
+        self.data.get_word(Self::PROP_TABLE_OFFSET)
     }
 
     pub fn parent(self) -> Option<Object<'a>> {
@@ -147,7 +151,7 @@ impl<'a> Object<'a> {
         if parent_id == 0 {
             None
         } else {
-            Some(self.mm.objects().by_id(parent_id))
+            Some(self.zm.objects().by_id(parent_id))
         }
     }
 
@@ -156,7 +160,7 @@ impl<'a> Object<'a> {
         if sibling_id == 0 {
             None
         } else {
-            Some(self.mm.objects().by_id(sibling_id))
+            Some(self.zm.objects().by_id(sibling_id))
         }
     }
 
@@ -165,7 +169,7 @@ impl<'a> Object<'a> {
         if child_id == 0 {
             None
         } else {
-            Some(self.mm.objects().by_id(child_id))
+            Some(self.zm.objects().by_id(child_id))
         }
     }
 
@@ -178,12 +182,70 @@ impl<'a> Object<'a> {
 
     #[inline]
     pub fn properties(self) -> PropertyTable<'a> {
-        PropertyTable::new(self.mm, self.prop_table_byteaddr())
+        PropertyTable::new(self.zm, self.prop_table_byteaddr())
     }
 
     #[inline]
     pub fn short_name(self) -> ZStr<'a> {
         self.properties().short_name
+    }
+
+    pub fn test_attr(self, attr: usize) -> bool {
+        let byte_num = 5 - (attr / 8);
+        let bit_num = attr % 8;
+        (self.data.get_byte(byte_num) & (1 << bit_num)) != 0
+    }
+
+    #[inline]
+    fn set_parent_id(self, parent_id: u16) -> MemoryWrite {
+        self.data.write_word(Self::PARENT_ID_OFFSET, parent_id)
+    }
+
+    #[inline]
+    fn set_sibling_id(self, sibling_id: u16) -> MemoryWrite {
+        self.data.write_word(Self::SIBLING_ID_OFFSET, sibling_id)
+    }
+
+    #[inline]
+    fn set_child_id(self, child_id: u16) -> MemoryWrite {
+        self.data.write_word(Self::CHILD_ID_OFFSET, child_id)
+    }
+
+    pub fn insert_into(self, dst: Object) -> Vec<MemoryWrite> {
+        // "Initially [self] can be at any point in the object tree.
+        let mut result = self.remove_from_parent();
+        result.push(self.set_parent_id(dst.id));
+        result.push(self.set_sibling_id(dst.child_id()));
+        result.push(dst.set_child_id(self.id));
+        result
+    }
+
+    pub fn remove_from_parent(self) -> Vec<MemoryWrite> {
+        // TODO: unclear if calling this function when parent() is None
+        // is invalid or just a no-op
+        // but insert_into calls remove_from_parent() unconditionally
+        // so for now it's a no-op for objects with no parents
+        let parent = match self.parent() {
+            Some(obj) => obj,
+            None => return Vec::new(),
+        };
+        if parent.child_id() == self.id {
+            vec![
+                parent.set_child_id(self.sibling_id()),
+                self.set_parent_id(0),
+                self.set_sibling_id(0),
+            ]
+        } else {
+            let prev_sibling = parent
+                .children()
+                .find(|obj| obj.sibling_id() == self.id)
+                .unwrap();
+            vec![
+                prev_sibling.set_sibling_id(self.sibling_id()),
+                self.set_parent_id(0),
+                self.set_sibling_id(0),
+            ]
+        }
     }
 }
 
@@ -230,11 +292,11 @@ impl<'a> DefaultPropertyTable<'a> {
     pub(super) const SIZE: usize =
         Property::DEFAULT_SIZE * ((Property::MAX_ID - Property::MIN_ID + 1) as usize);
 
-    pub(super) fn new(mm: MemoryModel<'a>, byteaddr: u16) -> Self {
+    pub(super) fn new(zm: ZMachineState<'a>, byteaddr: u16) -> Self {
         let start = byteaddr as usize;
         let end = start + Self::SIZE;
         DefaultPropertyTable {
-            table: mm.memory().get_subslice(start, end),
+            table: zm.memory().get_subslice(start, end),
         }
     }
 
@@ -251,12 +313,12 @@ impl<'a> DefaultPropertyTable<'a> {
 pub struct PropertyTable<'a> {
     short_name: ZStr<'a>,
     table: MemorySlice<'a>,
-    mm: MemoryModel<'a>,
+    zm: ZMachineState<'a>,
 }
 
 impl<'a> PropertyTable<'a> {
-    fn new(mm: MemoryModel<'a>, byteaddr: u16) -> Self {
-        let table = mm.memory().get_subslice_unbounded(byteaddr as usize);
+    fn new(zm: ZMachineState<'a>, byteaddr: u16) -> Self {
+        let table = zm.memory().get_subslice_unbounded(byteaddr as usize);
         let (table, name_len_words) = table.take_byte();
         let name_len_bytes = 2 * (name_len_words as usize);
         let (table, short_name) = table.take_n_bytes(name_len_bytes);
@@ -264,7 +326,7 @@ impl<'a> PropertyTable<'a> {
         PropertyTable {
             short_name,
             table,
-            mm,
+            zm,
         }
     }
 
@@ -282,7 +344,7 @@ impl<'a> PropertyTable<'a> {
 
     pub fn by_id_with_default(self, id: u8) -> Property<'a> {
         self.by_id(id)
-            .unwrap_or_else(|| self.mm.default_properties().by_id(id))
+            .unwrap_or_else(|| self.zm.default_properties().by_id(id))
     }
 
     pub fn next_after_id(self, id: u8) -> Option<Property<'a>> {
@@ -307,7 +369,7 @@ impl<'a> PropertyTable<'a> {
     //  contains no reference to an object
     //  although in practice it's used along with `get prop_addr object property`
     pub fn by_byteaddr(self, byteaddr: u16) -> Property<'a> {
-        let memory = self.mm.memory();
+        let memory = self.zm.memory();
         let addr = byteaddr as usize;
         let byte_neg1 = memory.get_byte(addr - 1);
         let (id, data_len) = if (byte_neg1 & 0x80) != 0 {

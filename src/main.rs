@@ -2,7 +2,7 @@ use std::fs::File;
 use std::io::prelude::*;
 
 use zmachine::text::{AbbrTable, AlphTable, UnicodeTransTable, ZChar, ZStr, ZTextEncodable};
-use zmachine::{Dictionary, MemoryModel, Object, ObjectTable};
+use zmachine::{Dictionary, Object, ObjectTable, ZMachine, ZMachineState};
 
 fn dump_dictionary(dict: Dictionary) {
     println!("word separators: {:?}", dict.word_seps);
@@ -78,24 +78,31 @@ pub fn dump_objs_seq(objs: ObjectTable) {
     // }
 }
 
-fn main() {
-    let mut f = File::open("assets/AllRoads.z5").unwrap();
-    let mut src = Vec::new();
-    f.read_to_end(&mut src).unwrap();
-    let mm = MemoryModel::from_src(&src);
-
-    let key = "resistance"
+fn lookup_word(zm: ZMachineState, word: &str) {
+    let key = word
         .chars()
         .encode_ztext(AlphTable::Default, UnicodeTransTable::Default)
         .collect::<Vec<_>>();
     let key = ZStr::from(&key[..]).zchars();
-    let entry = mm.dictionary().by_key(key).unwrap();
+    let entry = zm.dictionary().by_key(key).unwrap();
     let headword = entry
         .key()
         .unicode_chars(AlphTable::Default, UnicodeTransTable::Default)
         .collect::<String>();
     println!("{}", headword);
+}
 
-    // dump_objs_rec(mm.objects());
-    // dump_dictionary(mm.dictionary());
+fn main() {
+    let mut f = File::open("assets/AllRoads.z5").unwrap();
+    let mut src = Vec::new();
+    f.read_to_end(&mut src).unwrap();
+    let mut zmach = ZMachine::from_src(&mut src);
+
+    let objs = zmach.state().objects();
+    let stationery = objs.by_id(140);
+    let mut v = stationery.remove_from_parent();
+    v.extend(objs.by_id(109).insert_into(stationery));
+    println!("{:?}", v);
+    zmach.apply_all(&v);
+    dump_objs_rec(zmach.state().objects());
 }

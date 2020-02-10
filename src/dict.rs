@@ -1,4 +1,4 @@
-use super::{MemoryModel, MemorySlice};
+use super::{MemorySlice, ZMachineState};
 use crate::text::{ZChar, ZStr};
 use std::cmp::Ordering;
 
@@ -12,8 +12,8 @@ pub struct Dictionary<'a> {
 impl<'a> Dictionary<'a> {
     pub const KEY_SIZE: usize = 6;
 
-    pub(super) fn new(mm: MemoryModel<'a>, byteaddr: u16) -> Self {
-        let table = mm.memory().get_subslice_unbounded(byteaddr as usize);
+    pub(super) fn new(zm: ZMachineState<'a>, byteaddr: u16) -> Self {
+        let table = zm.memory().get_subslice_unbounded(byteaddr as usize);
         let (table, n_word_seps) = table.take_byte();
         let (table, word_seps) = table.take_n_bytes(n_word_seps as usize);
         let (table, entry_len) = table.take_byte();

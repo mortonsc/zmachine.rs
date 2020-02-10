@@ -3,10 +3,11 @@ extern crate lazy_static;
 #[macro_use]
 extern crate enum_primitive;
 
-pub mod dict;
 pub mod instr;
-pub mod object;
 pub mod text;
+
+mod dict;
+mod object;
 mod util;
 
 pub use dict::Dictionary;
@@ -17,15 +18,14 @@ use std::ops::Deref;
 use text::ZStr;
 
 #[derive(Debug, Clone, Copy)]
-pub struct MemoryModel<'a> {
+pub struct ZMachineState<'a> {
     memory: &'a [u8],
+    pc: usize,
+    stack: &'a [i16],
+    call_stack: &'a [StackFrame],
 }
 
-impl<'a> MemoryModel<'a> {
-    pub fn from_src(src: &'a [u8]) -> Self {
-        MemoryModel { memory: src }
-    }
-
+impl<'a> ZMachineState<'a> {
     // returns a MemorySlice containing the entirety of memory
     #[inline]
     pub fn memory(self) -> MemorySlice<'a> {
@@ -69,6 +69,11 @@ impl<'a> MemorySlice<'a> {
         self.contents.len()
     }
 
+    #[inline]
+    pub fn as_slice(self) -> &'a [u8] {
+        self.contents
+    }
+
     // returns the byteaddr of the beginning of this slice
     // (a byteaddr is a u16 representing an address in memory)
     #[inline]
@@ -92,6 +97,24 @@ impl<'a> MemorySlice<'a> {
     #[inline]
     pub fn get_word(self, index: usize) -> u16 {
         u16::from_be_bytes([self.contents[index], self.contents[index + 1]])
+    }
+
+    #[inline]
+    #[must_use = "doesn't mutate"]
+    pub fn write_byte(self, index: usize, val: u8) -> MemoryWrite {
+        MemoryWrite {
+            byteaddr: self.byteaddr_of_offset(index),
+            data: WriteData::Byte(val),
+        }
+    }
+
+    #[inline]
+    #[must_use = "doesn't mutate"]
+    pub fn write_word(self, index: usize, val: u16) -> MemoryWrite {
+        MemoryWrite {
+            byteaddr: self.byteaddr_of_offset(index),
+            data: WriteData::Word(val),
+        }
     }
 
     #[inline]
@@ -176,4 +199,94 @@ impl<'a> From<MemorySlice<'a>> for ZStr<'a> {
     fn from(ms: MemorySlice<'a>) -> Self {
         ZStr::from(ms.contents)
     }
+}
+
+#[derive(Debug)]
+pub struct MemoryWrite {
+    pub byteaddr: u16,
+    pub data: WriteData,
+}
+
+#[derive(Debug)]
+pub enum WriteData {
+    Byte(u8),
+    Word(u16),
+    ByteRange(Vec<u8>),
+    WordRange(Vec<u16>),
+    // maybe add ZStr option
+}
+
+pub struct ZMachine<'a> {
+    memory: &'a mut [u8],
+    pc: usize,
+    stack: Vec<i16>,
+    call_stack: Vec<StackFrame>,
+}
+
+impl<'a> ZMachine<'a> {
+    #[inline]
+    pub fn from_src(src: &'a mut [u8]) -> Self {
+        ZMachine {
+            memory: src,
+            pc: 0, // TODO
+            stack: Vec::new(),
+            call_stack: Vec::new(),
+        }
+    }
+
+    #[inline]
+    pub fn state(&'a self) -> ZMachineState<'a> {
+        ZMachineState {
+            memory: self.memory,
+            pc: self.pc,
+            stack: &self.stack,
+            call_stack: &self.call_stack,
+        }
+    }
+
+    #[inline]
+    fn write_byte(&mut self, addr: usize, val: u8) {
+        self.memory[addr] = val;
+    }
+
+    #[inline]
+    fn write_word(&mut self, addr: usize, val: u16) {
+        let [byte1, byte2] = val.to_be_bytes();
+        self.memory[addr] = byte1;
+        self.memory[addr + 1] = byte2;
+    }
+
+    pub fn apply(&mut self, write: &MemoryWrite) {
+        //TODO: enforce boundary between dynamic/static, protect read-only header data, etc
+        let addr = write.byteaddr as usize;
+        match write.data {
+            WriteData::Byte(byte) => self.write_byte(addr, byte),
+            WriteData::Word(word) => self.write_word(addr, word),
+            WriteData::ByteRange(ref bytes) => {
+                for (offset, byte) in bytes.iter().enumerate() {
+                    self.write_byte(addr + offset, *byte);
+                }
+            }
+            WriteData::WordRange(ref words) => {
+                for (offset, word) in words.iter().enumerate() {
+                    self.write_word(addr + (2 * offset), *word);
+                }
+            }
+        }
+    }
+
+    #[inline]
+    pub fn apply_all(&mut self, writes: &[MemoryWrite]) {
+        for write in writes {
+            self.apply(write);
+        }
+    }
+}
+
+#[derive(Debug)]
+struct StackFrame {
+    // TODO: not sure what needs to be in this
+    return_addr: usize,
+    return_dst: Option<u8>,
+    locals: Vec<i16>,
 }
