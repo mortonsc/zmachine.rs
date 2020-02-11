@@ -1,5 +1,4 @@
-extern crate num;
-
+use super::MemorySlice;
 use num::FromPrimitive;
 
 #[derive(Debug, Clone, Copy)]
@@ -40,7 +39,6 @@ impl OperandType {
             _ => OperandType::Variable,
         }
     }
-
 }
 
 enum InstrType {
@@ -54,31 +52,40 @@ enum InstrType {
 }
 
 pub enum Instr {
-    ZeroOp {opcode: ZeroOpCode},
-    OneOp {opcode: OneOpCode, op: Operand},
-    TwoOp {opcode: TwoOpCode, op1: Operand, op2: Operand},
-    VarOp {opcode: VarOpCode, ops: Vec<Operand>},
-    Ext {opcode: ExtOpCode, ops: Vec<Operand>},
+    ZeroOp {
+        opcode: ZeroOpCode,
+    },
+    OneOp {
+        opcode: OneOpCode,
+        op: Operand,
+    },
+    TwoOp {
+        opcode: TwoOpCode,
+        // despite the name, many TwoOp instructions can take 3 or 4 operands
+        ops: Vec<Operand>,
+    },
+    VarOp {
+        opcode: VarOpCode,
+        ops: Vec<Operand>,
+    },
+    Ext {
+        opcode: ExtOpCode,
+        ops: Vec<Operand>,
+    },
 }
 
-
 impl Operand {
-    fn decode_one<'a, I>(program: &mut I, op_type: OperandType) -> Option<Self>
-        where I: Iterator<Item=&'a u8>
-    {
+    fn take_one(program: &mut MemorySlice, op_type: OperandType) -> Self {
         match op_type {
-            OperandType::Omitted => None,
-            OperandType::SmallConst => Some(Operand::SmallConst(*program.next()?)),
-            OperandType::Variable => Some(Operand::Variable(*program.next()?)),
-            OperandType::LargeConst => Some(Operand::LargeConst(u16::from_be_bytes([
-                *program.next()?,
-                *program.next()?,
-            ]))),
+            OperandType::SmallConst => Operand::SmallConst(program.take_byte()),
+            OperandType::Variable => Operand::LargeConst(program.take_word()),
+            OperandType::LargeConst => Operand::Variable(program.take_byte()),
         }
     }
 
     fn decode_to_vec<'a, I>(program: &mut I, n_spec_bytes: usize) -> Option<Vec<Self>>
-        where I: Iterator<Item=&'a u8>
+    where
+        I: Iterator<Item = &'a u8>,
     {
         let mut op_types: Vec<OperandType> = Vec::new();
         for byte in program.take(n_spec_bytes) {
@@ -86,21 +93,18 @@ impl Operand {
             op_types.push(OperandType::from_last_two_bits(*byte >> 4));
             op_types.push(OperandType::from_last_two_bits(*byte >> 2));
             op_types.push(OperandType::from_last_two_bits(*byte));
-        };
+        }
 
         let mut result: Vec<Operand> = Vec::new();
         for op_type in op_types.iter().take_while(|t| t.is_not_omitted()) {
             result.push(Operand::decode_one(program, *op_type)?);
-        };
+        }
         Some(result)
     }
-
 }
 
-
-
 impl Instr {
-    pub fn decode_one<'a, I: Iterator<Item=&'a u8>>(program: &mut I) -> Option<Self> {
+    pub fn decode_one<'a, I: Iterator<Item = &'a u8>>(program: &mut I) -> Option<Self> {
         let opcode1 = *program.next()?;
         let instr_type = match opcode1 {
             0xbe => InstrType::Ext,
@@ -113,8 +117,7 @@ impl Instr {
         };
 
         let opcode_byte = match instr_type {
-            InstrType::ShortZeroOp
-            | InstrType::ShortOneOp => opcode1 & 0x0f,
+            InstrType::ShortZeroOp | InstrType::ShortOneOp => opcode1 & 0x0f,
             InstrType::LongTwoOp
             | InstrType::VariableTwoOp
             | InstrType::VariableDoubleVarOp
@@ -124,14 +127,14 @@ impl Instr {
 
         let instr = match instr_type {
             InstrType::ShortZeroOp => Instr::ZeroOp {
-                opcode: ZeroOpCode::from_u8(opcode_byte)?
+                opcode: ZeroOpCode::from_u8(opcode_byte)?,
             },
             InstrType::ShortOneOp => Instr::OneOp {
                 opcode: OneOpCode::from_u8(opcode_byte)?,
                 op: {
                     let op_type = OperandType::from_last_two_bits(opcode1 >> 4);
                     Operand::decode_one(program, op_type)?
-                }
+                },
             },
             InstrType::LongTwoOp => Instr::TwoOp {
                 opcode: TwoOpCode::from_u8(opcode_byte)?,
@@ -167,9 +170,8 @@ impl Instr {
             },
         };
         Some(instr)
-    } 
+    }
 }
-
 
 enum_from_primitive! {
 #[derive(Debug, PartialEq)]

@@ -318,10 +318,10 @@ pub struct PropertyTable<'a> {
 
 impl<'a> PropertyTable<'a> {
     fn new(zm: ZMachineState<'a>, byteaddr: u16) -> Self {
-        let table = zm.memory().get_subslice_unbounded(byteaddr as usize);
-        let (table, name_len_words) = table.take_byte();
+        let mut table = zm.memory().get_subslice_unbounded(byteaddr as usize);
+        let name_len_words = table.take_byte();
         let name_len_bytes = 2 * (name_len_words as usize);
-        let (table, short_name) = table.take_n_bytes(name_len_bytes);
+        let short_name = table.take_n_bytes(name_len_bytes);
         let short_name = ZStr::from(short_name);
         PropertyTable {
             short_name,
@@ -418,24 +418,22 @@ fn parse_2byte_prop_header(byte1: u8, byte2: u8) -> (u8, usize) {
     (id, data_len)
 }
 
-fn take_prop_header<'a>(table: MemorySlice<'a>) -> (MemorySlice<'a>, u8, usize) {
-    let (table, byte1) = table.take_byte();
+fn take_prop_header<'a>(table: &mut MemorySlice) -> (u8, usize) {
+    let byte1 = table.take_byte();
     if (byte1 & 0x80) != 0 {
         // high bit set in either of first two bytes means two-byte header format
-        let (table, byte2) = table.take_byte();
-        let (id, data_len) = parse_2byte_prop_header(byte1, byte2);
-        (table, id, data_len)
+        let byte2 = table.take_byte();
+        parse_2byte_prop_header(byte1, byte2)
     } else {
         // one-byte header format
-        let (id, data_len) = parse_1byte_prop_header(byte1);
-        (table, id, data_len)
+        parse_1byte_prop_header(byte1)
     }
 }
 
-fn take_property<'a>(table: MemorySlice<'a>) -> (MemorySlice<'a>, Property<'a>) {
-    let (table, id, data_len) = take_prop_header(table);
-    let (table, data) = table.take_n_bytes(data_len);
-    (table, Property { id, data })
+fn take_property<'a>(table: &mut MemorySlice<'a>) -> Property<'a> {
+    let (id, data_len) = take_prop_header(table);
+    let data = table.take_n_bytes(data_len);
+    Property { id, data }
 }
 
 pub struct PropertyTableIterator<'a> {
@@ -447,17 +445,13 @@ impl<'a> Iterator for PropertyTableIterator<'a> {
     type Item = Property<'a>;
 
     fn next(&mut self) -> Option<Self::Item> {
-        let (table, prop) = take_property(self.table);
+        let prop = take_property(&mut self.table);
         if (prop.id == 0) || (prop.id >= self.prev_id) {
             // id must be non-zero and strictly decreasing down the table
             // if we hit this case we've probably gone past the end of the table
             return None;
         }
-
-        // update internal state before we return
         self.prev_id = prop.id;
-        self.table = table;
-
         Some(prop)
     }
 }

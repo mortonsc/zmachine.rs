@@ -17,11 +17,16 @@ use std::ops::Deref;
 
 use text::ZStr;
 
+pub enum Version {
+    V5,
+    V7,
+    V8,
+}
+
 #[derive(Debug, Clone, Copy)]
 pub struct ZMachineState<'a> {
     memory: &'a [u8],
     pc: usize,
-    stack: &'a [i16],
     call_stack: &'a [StackFrame],
 }
 
@@ -134,42 +139,30 @@ impl<'a> MemorySlice<'a> {
             .map(|pair| u16::from_be_bytes([pair[0], pair[1]]))
     }
 
-    #[must_use = "returns new slice, doesn't mutate"]
-    pub fn take_byte(self) -> (Self, u8) {
-        (
-            MemorySlice {
-                base_addr: self.base_addr + 1,
-                contents: &self.contents[1..],
-            },
-            self.get_byte(0),
-        )
+    pub fn take_byte(&mut self) -> u8 {
+        let res = self.get_byte(0);
+        self.base_addr += 1;
+        self.contents = &self.contents[1..];
+        res
     }
 
-    #[must_use = "returns new slice, doesn't mutate"]
-    pub fn take_word(self) -> (Self, u16) {
-        (
-            MemorySlice {
-                base_addr: self.base_addr + 2,
-                contents: &self.contents[2..],
-            },
-            self.get_word(0),
-        )
+    pub fn take_word(&mut self) -> u16 {
+        let res = self.get_word(0);
+        self.base_addr += 2;
+        self.contents = &self.contents[2..];
+        res
     }
 
     // splits off a slice containing the first n bytes of this one
-    // returns (remaining, taken)
-    // on the model of nom
-    pub fn take_n_bytes(self, n: usize) -> (Self, Self) {
+    pub fn take_n_bytes(&mut self, n: usize) -> Self {
         let (taken, remaining) = self.contents.split_at(n);
-        let taken = MemorySlice {
+        let res = MemorySlice {
             base_addr: self.base_addr,
             contents: taken,
         };
-        let remaining = MemorySlice {
-            base_addr: self.base_addr + n,
-            contents: remaining,
-        };
-        (remaining, taken)
+        self.base_addr += n;
+        self.contents = remaining;
+        res
     }
 
     pub fn get_subslice(self, start_index: usize, end_index: usize) -> Self {
@@ -219,7 +212,6 @@ pub enum WriteData {
 pub struct ZMachine<'a> {
     memory: &'a mut [u8],
     pc: usize,
-    stack: Vec<i16>,
     call_stack: Vec<StackFrame>,
 }
 
@@ -229,7 +221,6 @@ impl<'a> ZMachine<'a> {
         ZMachine {
             memory: src,
             pc: 0, // TODO
-            stack: Vec::new(),
             call_stack: Vec::new(),
         }
     }
@@ -239,7 +230,6 @@ impl<'a> ZMachine<'a> {
         ZMachineState {
             memory: self.memory,
             pc: self.pc,
-            stack: &self.stack,
             call_stack: &self.call_stack,
         }
     }
@@ -288,5 +278,15 @@ struct StackFrame {
     // TODO: not sure what needs to be in this
     return_addr: usize,
     return_dst: Option<u8>,
+    n_args: u32,
     locals: Vec<i16>,
+    data_stack: Vec<i16>,
+}
+
+#[derive(Debug)]
+enum CtrlFlow {
+    Proceed,
+    Jump { offset: i16 },
+    Return { ret_val: i16 },
+    Call { paddr: u16 },
 }

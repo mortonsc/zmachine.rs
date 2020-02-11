@@ -13,15 +13,15 @@ impl<'a> Dictionary<'a> {
     pub const KEY_SIZE: usize = 6;
 
     pub(super) fn new(zm: ZMachineState<'a>, byteaddr: u16) -> Self {
-        let table = zm.memory().get_subslice_unbounded(byteaddr as usize);
-        let (table, n_word_seps) = table.take_byte();
-        let (table, word_seps) = table.take_n_bytes(n_word_seps as usize);
-        let (table, entry_len) = table.take_byte();
+        let mut table = zm.memory().get_subslice_unbounded(byteaddr as usize);
+        let n_word_seps = table.take_byte();
+        let word_seps = table.take_n_bytes(n_word_seps as usize);
+        let entry_len = table.take_byte();
         let entry_len = entry_len as usize;
         assert!(entry_len >= Self::KEY_SIZE);
-        let (table, num_entries) = table.take_word();
+        let num_entries = table.take_word();
         let table_len = entry_len * (num_entries as usize);
-        let (_, table) = table.take_n_bytes(table_len);
+        let table = table.take_n_bytes(table_len);
         Dictionary {
             word_seps,
             table,
@@ -38,10 +38,10 @@ impl<'a> Dictionary<'a> {
         let idx = idx as usize;
         let entry_start = idx * self.entry_len;
         let entry_end = entry_start + self.entry_len;
-        let entry = self.table.get_subslice(entry_start, entry_end);
-        let (data, key) = entry.take_n_bytes(Self::KEY_SIZE);
+        let mut entry = self.table.get_subslice(entry_start, entry_end);
+        let key = entry.take_n_bytes(Self::KEY_SIZE);
         let key = ZStr::from(key);
-        DictEntry { key, data }
+        DictEntry { key, data: entry }
     }
 
     pub fn by_key(self, key: impl IntoIterator<Item = ZChar>) -> Option<DictEntry<'a>> {

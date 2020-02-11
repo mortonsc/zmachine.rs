@@ -1,6 +1,7 @@
 use std::fs::File;
 use std::io::prelude::*;
 
+use zmachine::instr;
 use zmachine::text::{AbbrTable, AlphTable, UnicodeTransTable, ZChar, ZStr, ZTextEncodable};
 use zmachine::{Dictionary, Object, ObjectTable, ZMachine, ZMachineState};
 
@@ -98,11 +99,5 @@ fn main() {
     f.read_to_end(&mut src).unwrap();
     let mut zmach = ZMachine::from_src(&mut src);
 
-    let objs = zmach.state().objects();
-    let stationery = objs.by_id(140);
-    let mut v = stationery.remove_from_parent();
-    v.extend(objs.by_id(109).insert_into(stationery));
-    println!("{:?}", v);
-    zmach.apply_all(&v);
-    dump_objs_rec(zmach.state().objects());
+    instr::test();
 }
