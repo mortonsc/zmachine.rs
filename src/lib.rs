@@ -1,7 +1,5 @@
 #[macro_use]
 extern crate lazy_static;
-#[macro_use]
-extern crate enum_primitive;
 
 pub mod instr;
 pub mod text;
@@ -231,6 +229,22 @@ impl<'a> ZMachine<'a> {
             memory: self.memory,
             pc: self.pc,
             call_stack: &self.call_stack,
+        }
+    }
+
+    #[inline]
+    fn stack_frame(&mut self) -> &mut StackFrame {
+        let idx = self.call_stack.len() - 1;
+        &mut self.call_stack[idx]
+    }
+
+    // mutable because variable 0x00 pops the stack
+    fn get_var(&mut self, var: u8) -> i16 {
+        match var {
+            0x00 => self.stack_frame().data_stack.pop().unwrap(),
+            0x01..=0x0f => self.stack_frame().locals[(var - 1) as usize],
+            // read the global var from memory
+            0x10..=0xff => unimplemented!(),
         }
     }
 
