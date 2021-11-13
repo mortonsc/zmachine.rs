@@ -353,6 +353,7 @@ impl<'a> PropertyTable<'a> {
         // "It is illegal to try to find the next property of a property
         // "which does not exist, and an interpreter should halt with an error message
         // "(if it can efficiently check this condition).
+        // TODO shouldn't really be using an assert for this check though
         assert!(current_prop.unwrap().id == id);
         // None is a valid result; it means current_prop is the last one in the table
         iter.next()

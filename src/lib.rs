@@ -5,6 +5,7 @@ pub mod instr;
 pub mod text;
 
 mod dict;
+mod execution;
 mod object;
 mod util;
 
@@ -13,13 +14,15 @@ pub use object::{DefaultPropertyTable, Object, ObjectTable, Property, PropertyTa
 
 use std::ops::Deref;
 
-use text::ZStr;
+use text::{AlphTable, UnicodeFromZscii, UnicodeTransTable, ZStr, ZsciiDecodable};
 
 pub enum Version {
     V5,
     V7,
     V8,
 }
+
+const SP: u8 = 0x00;
 
 #[derive(Debug, Clone, Copy)]
 pub struct ZMachineState<'a> {
@@ -248,6 +251,14 @@ impl<'a> ZMachine<'a> {
         }
     }
 
+    fn set_var(&mut self, var: u8, val: i16) {
+        match var {
+            0x00 => self.stack_frame().data_stack.push(val),
+            0x01..=0x0f => self.stack_frame().locals[(var - 1) as usize] = val,
+            0x10..=0xff => unimplemented!(),
+        }
+    }
+
     #[inline]
     fn write_byte(&mut self, addr: usize, val: u8) {
         self.memory[addr] = val;
@@ -284,6 +295,24 @@ impl<'a> ZMachine<'a> {
         for write in writes {
             self.apply(write);
         }
+    }
+
+    pub fn print_zstr(&self, zstr: ZStr) {
+        // TODO: all the stuff about different output streams
+        // TODO: custom alphabet tables
+        // TODO: custom unicode translation tables
+        // TODO: handle abbreviations
+        let unicode_str: String = zstr
+            .zchars()
+            .zscii(AlphTable::Default)
+            .to_unicode(UnicodeTransTable::Default)
+            .collect();
+        print!("{}", unicode_str);
+    }
+
+    pub fn print_newline(&self) {
+        // TODO: different output streams
+        println!("");
     }
 }
 
