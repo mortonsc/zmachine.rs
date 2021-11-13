@@ -99,5 +99,5 @@ fn main() {
     f.read_to_end(&mut src).unwrap();
     let mut zmach = ZMachine::from_src(&mut src);
 
-    instr::test();
+    instr::parse::test();
 }

@@ -211,6 +211,7 @@ pub enum WriteData {
 }
 
 pub struct ZMachine<'a> {
+    // TODO: add version and other data from header
     memory: &'a mut [u8],
     pc: usize,
     call_stack: Vec<StackFrame>,

@@ -93,8 +93,8 @@ impl<'a> ZStr<'a> {
 pub struct Zscii(pub u8);
 
 impl Zscii {
-    const NEWLINE: Self = Zscii(13);
-    const SPACE: Self = Zscii(b' ');
+    pub const NEWLINE: Self = Zscii(13);
+    pub const SPACE: Self = Zscii(b' ');
 
     fn decompose(self) -> (ZChar, ZChar) {
         (ZChar(self.0 >> 5), ZChar(self.0 & 0x1f))
@@ -512,7 +512,7 @@ where
 }
 
 // defining a trait to make this a nice adapter is too much effort
-fn zscii_to_zchars<'a>(
+pub fn zscii_to_zchars<'a>(
     zscii_chars: impl Iterator<Item = Zscii> + 'a,
     alph_table: AlphTable<'a>,
 ) -> impl Iterator<Item = ZChar> + 'a {

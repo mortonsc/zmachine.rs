@@ -1,6 +1,7 @@
 use super::{MemorySlice, ZMachineState};
-use crate::text::{ZChar, ZStr};
+use crate::text::{zscii_to_zchars, AlphTable, ZChar, ZStr, Zscii};
 use std::cmp::Ordering;
+use std::iter::once;
 
 #[derive(Debug, Clone, Copy)]
 pub struct Dictionary<'a> {
@@ -15,9 +16,11 @@ impl<'a> Dictionary<'a> {
     pub(super) fn new(zm: ZMachineState<'a>, byteaddr: u16) -> Self {
         let mut table = zm.memory().get_subslice_unbounded(byteaddr as usize);
         let n_word_seps = table.take_byte();
+        // TODO: enforce that <space> can't be a word separator
         let word_seps = table.take_n_bytes(n_word_seps as usize);
         let entry_len = table.take_byte();
         let entry_len = entry_len as usize;
+        // TODO: shouldn't use an assert for this
         assert!(entry_len >= Self::KEY_SIZE);
         let num_entries = table.take_word();
         let table_len = entry_len * (num_entries as usize);
@@ -79,5 +82,58 @@ impl<'a> DictEntry<'a> {
     #[inline]
     pub fn data(self) -> MemorySlice<'a> {
         self.data
+    }
+    #[inline]
+    fn byte_addr(self) -> usize {
+        self.data.base_addr - Dictionary::KEY_SIZE
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct ParseData {
+    pub dict_entry_addr: Option<usize>,
+    pub word_len: usize,
+    pub pos_in_text_buffer: usize,
+}
+
+impl<'a> Dictionary<'a> {
+    fn is_sep(&self, zscii: Zscii) -> bool {
+        self.word_seps
+            .byte_iter()
+            .find(|&&z| z == zscii.0)
+            .is_some()
+    }
+    fn find_addr_of_entry(&self, word: &[Zscii]) -> Option<usize> {
+        // TODO: handle other alphabet tables
+        self.by_key(zscii_to_zchars(word.iter().copied(), AlphTable::Default))
+            .map(|de| de.byte_addr())
+    }
+    pub fn parse_zscii_text(&self, text: &[Zscii]) -> Vec<ParseData> {
+        let mut results: Vec<ParseData> = Vec::new();
+        let mut current_word_offset = 0;
+        // TODO: need to convert text to lowercase before searching against dictionary
+        // add a space on the end to make sure we parse the last word
+        for (i, z) in text.iter().copied().chain(once(Zscii::SPACE)).enumerate() {
+            if z == Zscii::SPACE || self.is_sep(z) {
+                // if there was some text before this separator, look it up in the dictionary
+                if i > current_word_offset {
+                    results.push(ParseData {
+                        dict_entry_addr: self.find_addr_of_entry(&text[current_word_offset..i]),
+                        word_len: i - current_word_offset,
+                        pos_in_text_buffer: current_word_offset,
+                    });
+                }
+                // separators other than a space also count as words in their own right
+                if z != Zscii::SPACE {
+                    results.push(ParseData {
+                        dict_entry_addr: self.find_addr_of_entry(&text[i..i + 1]),
+                        word_len: 1,
+                        pos_in_text_buffer: i,
+                    });
+                }
+                current_word_offset = i + 1;
+            }
+        }
+        results
     }
 }
