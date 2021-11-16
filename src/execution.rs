@@ -1,14 +1,13 @@
 use super::instr::parse::decode_instr;
 use super::instr::{BranchData, BranchDst, Instr, Operand, SP};
-use super::object::Object;
 use super::text::ZStr;
 use super::ZMachine;
 
 #[derive(Debug)]
 struct StackFrame {
-    // TODO: not sure what needs to be in this
     ret_addr: usize,
     ret_dst: Option<u8>,
+    n_args: usize,
     locals: Vec<i16>,
     data_stack: Vec<i16>,
 }
@@ -59,6 +58,7 @@ impl<'a> ZMachine<'a> {
         let initial_frame = StackFrame {
             ret_addr: 0,
             ret_dst: None,
+            n_args: 0,
             locals: Vec::new(),
             data_stack: Vec::new(),
         };
@@ -221,6 +221,7 @@ impl<'a> ProgramState<'a> {
         let mut new_frame = StackFrame {
             ret_addr,
             ret_dst,
+            n_args: args.len(),
             locals: args,
             data_stack: Vec::new(),
         };
@@ -487,6 +488,32 @@ impl<'a> ProgramState<'a> {
                 routine_paddr,
                 arg1,
             } => self.routine_call_op(routine_paddr, None, vec![arg1]),
+            Instr::CallVS {
+                routine_paddr,
+                args,
+                dst,
+            } => self.routine_call_op(routine_paddr, Some(dst), args),
+            Instr::CallVN {
+                routine_paddr,
+                args,
+            } => self.routine_call_op(routine_paddr, None, args),
+            Instr::Pull { var_by_ref } => {
+                let var_by_ref = self.operand_as_var_by_ref(var_by_ref);
+                let val = self.get_var_by_value(SP);
+                self.set_var_by_ref(var_by_ref, val);
+                CtrlFlow::Proceed
+            }
+            Instr::Throw {
+                ret_val,
+                catch_frame,
+            } => {
+                let ret_val = self.operand_as_value(ret_val);
+                let catch_frame = self.operand_as_value(catch_frame) as usize;
+                CtrlFlow::Throw {
+                    ret_val,
+                    catch_frame,
+                }
+            }
             _ => unimplemented!(),
         }
     }

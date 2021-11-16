@@ -98,11 +98,87 @@ fn one_op_bits(input: Bitstream) -> IResult<Bitstream, (OperandType, u8)> {
 
 fn one_op_instr(input: &[u8]) -> IResult<&[u8], Instr> {
     let (input, (op_type, opcode)) = bits(one_op_bits)(input)?;
-    let (input, operand) = take_operand(input, op_type)?;
+    let (mut input, operand) = take_operand(input, op_type)?;
     let operand = operand.unwrap();
-    let (input, instr) = match opcode {
-        // TODO
-        _ => (input, Instr::IllegalOneOp),
+    let instr = match opcode {
+        0x0 => {
+            let (new_input, bdata) = branch_data(input)?;
+            input = new_input;
+            Instr::JZ { a: operand, bdata }
+        }
+        0x1 => {
+            let (new_input, bdata) = branch_data(input)?;
+            let (new_input, dst) = be_u8(new_input)?;
+            input = new_input;
+            Instr::GetSibling {
+                obj_id: operand,
+                dst,
+                bdata,
+            }
+        }
+        0x2 => {
+            let (new_input, bdata) = branch_data(input)?;
+            let (new_input, dst) = be_u8(new_input)?;
+            input = new_input;
+            Instr::GetChild {
+                obj_id: operand,
+                dst,
+                bdata,
+            }
+        }
+        0x3 => {
+            let (new_input, dst) = be_u8(input)?;
+            input = new_input;
+            Instr::GetParent {
+                obj_id: operand,
+                dst,
+            }
+        }
+        0x4 => {
+            let (new_input, dst) = be_u8(input)?;
+            input = new_input;
+            Instr::GetPropLen {
+                prop_addr: operand,
+                dst,
+            }
+        }
+        0x5 => Instr::Inc {
+            var_by_ref: operand,
+        },
+        0x6 => Instr::Dec {
+            var_by_ref: operand,
+        },
+        0x7 => Instr::PrintAddr {
+            zstr_byteaddr: operand,
+        },
+        0x8 => {
+            let (new_input, dst) = be_u8(input)?;
+            input = new_input;
+            Instr::Call1S {
+                routine_paddr: operand,
+                dst,
+            }
+        }
+        0x9 => Instr::RemoveObj { obj_id: operand },
+        0xa => Instr::PrintObj { obj_id: operand },
+        0xb => Instr::Ret { val: operand },
+        // TODO: not sure if offset is actually a normal operand
+        0xc => Instr::Jump { offset: operand },
+        0xd => Instr::PrintPAddr {
+            zstr_paddr: operand,
+        },
+        0xe => {
+            let (new_input, dst) = be_u8(input)?;
+            input = new_input;
+            Instr::Load {
+                var_by_ref: operand,
+                dst,
+            }
+        }
+        0xf => Instr::Call1N {
+            routine_paddr: operand,
+        },
+        0x10..=0xff => panic!("parser should return a 4-bit opcode"),
     };
     Ok((input, instr))
 }
@@ -146,7 +222,13 @@ fn zero_op_instr(input: &[u8]) -> IResult<&[u8], Instr> {
             input = new_input;
             Instr::Verify { bdata }
         }
-        _ => panic!(), // parser should not emit any other value
+        0xe => panic!("this should be parsed as extended opcode"),
+        0xf => {
+            let (new_input, bdata) = branch_data(input)?;
+            input = new_input;
+            Instr::Piracy { bdata }
+        }
+        0x10..=0xff => panic!("parser should emit a 4-bit opcode"),
     };
     Ok((input, instr))
 }

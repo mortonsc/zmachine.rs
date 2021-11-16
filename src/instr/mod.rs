@@ -9,11 +9,6 @@ pub enum Operand {
     Variable(u8),
 }
 
-impl Operand {
-    // TODO: not sure what type this should return exactly
-    // fn value(self, zm: &ZMachineState) -> i16;
-}
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum OperandType {
     LargeConst,
@@ -228,6 +223,21 @@ pub enum Instr {
         b: Operand,
         dst: u8,
     },
+    GetProp {
+        obj_id: Operand,
+        prop: Operand,
+        dst: u8,
+    },
+    GetPropAddr {
+        obj_id: Operand,
+        prop: Operand,
+        dst: u8,
+    },
+    GetNextProp {
+        obj_id: Operand,
+        prop: Operand,
+        dst: u8,
+    },
     Call2S {
         routine_paddr: Operand,
         arg1: Operand,
@@ -237,11 +247,26 @@ pub enum Instr {
         routine_paddr: Operand,
         arg1: Operand,
     },
+    SetColor {
+        fg: Operand,
+        bg: Operand,
+    },
+    Throw {
+        ret_val: Operand,
+        catch_frame: Operand,
+    },
 
     // var ops
     CallVS {
         routine_paddr: Operand,
         args: Vec<Operand>,
         dst: u8,
+    },
+    CallVN {
+        routine_paddr: Operand,
+        args: Vec<Operand>,
+    },
+    Pull {
+        var_by_ref: Operand,
     },
 }
