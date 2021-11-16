@@ -7,7 +7,7 @@ use nom::bits::complete::take as take_bits;
 use nom::branch::alt;
 use nom::bytes::complete::tag;
 use nom::combinator::{map, not, verify};
-use nom::number::complete::{be_u16, be_u8};
+use nom::number::complete::{be_i16, be_i8, be_u16, be_u8};
 use nom::sequence::preceded;
 use nom::IResult;
 
@@ -33,8 +33,8 @@ fn operand_type_bits(input: Bitstream) -> IResult<Bitstream, OperandType> {
 
 fn take_operand(input: &[u8], op_type: OperandType) -> IResult<&[u8], Option<Operand>> {
     match op_type {
-        OperandType::LargeConst => map(be_u16, |n| Some(Operand::LargeConst(n)))(input),
-        OperandType::SmallConst => map(be_u8, |n| Some(Operand::SmallConst(n)))(input),
+        OperandType::LargeConst => map(be_i16, |n| Some(Operand::LargeConst(n)))(input),
+        OperandType::SmallConst => map(be_i8, |n| Some(Operand::SmallConst(n)))(input),
         OperandType::Variable => map(be_u8, |v| Some(Operand::Variable(v)))(input),
         OperandType::Omitted => Ok((input, None)),
     }

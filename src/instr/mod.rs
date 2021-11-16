@@ -1,9 +1,11 @@
 pub mod parse;
 
+pub const SP: u8 = 0x00;
+
 #[derive(Debug, Clone, Copy)]
 pub enum Operand {
-    LargeConst(u16),
-    SmallConst(u8),
+    LargeConst(i16),
+    SmallConst(i8),
     Variable(u8),
 }
 
@@ -22,8 +24,8 @@ enum OperandType {
 
 #[derive(Debug)]
 pub struct BranchData {
-    invert_cond: bool,
-    dst: BranchDst,
+    pub invert_cond: bool,
+    pub dst: BranchDst,
 }
 
 #[derive(Debug)]
@@ -81,7 +83,6 @@ pub enum Instr {
     GetParent {
         obj_id: Operand,
         dst: u8,
-        bdata: BranchData,
     },
     GetPropLen {
         prop_addr: Operand,
@@ -110,6 +111,7 @@ pub enum Instr {
         val: Operand,
     },
     Jump {
+        // TODO: is the offset a normal operand, or always a constant?
         offset: Operand,
     },
     PrintPAddr {
@@ -121,5 +123,125 @@ pub enum Instr {
     },
     Call1N {
         routine_paddr: Operand,
+    },
+
+    // two-op
+    // JE is "two-op" but the standard defines its behavior for 2, 3, or 4 operands
+    JE {
+        a: Operand,
+        others: Vec<Operand>,
+        bdata: BranchData,
+    },
+    JL {
+        a: Operand,
+        b: Operand,
+        bdata: BranchData,
+    },
+    JG {
+        a: Operand,
+        b: Operand,
+        bdata: BranchData,
+    },
+    DecChk {
+        var_by_ref: Operand,
+        cmp_val: Operand,
+        bdata: BranchData,
+    },
+    IncChk {
+        var_by_ref: Operand,
+        cmp_val: Operand,
+        bdata: BranchData,
+    },
+    JIn {
+        obj1: Operand,
+        obj2: Operand,
+        bdata: BranchData,
+    },
+    Test {
+        bitmap: Operand,
+        flags: Operand,
+        bdata: BranchData,
+    },
+    Or {
+        a: Operand,
+        b: Operand,
+        dst: u8,
+    },
+    And {
+        a: Operand,
+        b: Operand,
+        dst: u8,
+    },
+    TestAttr {
+        obj_id: Operand,
+        attr: Operand,
+        bdata: BranchData,
+    },
+    SetAttr {
+        obj_id: Operand,
+        attr: Operand,
+    },
+    ClearAttr {
+        obj_id: Operand,
+        attr: Operand,
+    },
+    Store {
+        var_by_ref: Operand,
+        val: Operand,
+    },
+    InsertObj {
+        obj_id: Operand,
+        dst_obj: Operand,
+    },
+    LoadW {
+        array: Operand,
+        word_index: Operand,
+        dst: u8,
+    },
+    LoadB {
+        array: Operand,
+        byte_index: Operand,
+        dst: u8,
+    },
+    Add {
+        a: Operand,
+        b: Operand,
+        dst: u8,
+    },
+    Sub {
+        a: Operand,
+        b: Operand,
+        dst: u8,
+    },
+    Mul {
+        a: Operand,
+        b: Operand,
+        dst: u8,
+    },
+    Div {
+        a: Operand,
+        b: Operand,
+        dst: u8,
+    },
+    Mod {
+        a: Operand,
+        b: Operand,
+        dst: u8,
+    },
+    Call2S {
+        routine_paddr: Operand,
+        arg1: Operand,
+        dst: u8,
+    },
+    Call2N {
+        routine_paddr: Operand,
+        arg1: Operand,
+    },
+
+    // var ops
+    CallVS {
+        routine_paddr: Operand,
+        args: Vec<Operand>,
+        dst: u8,
     },
 }
