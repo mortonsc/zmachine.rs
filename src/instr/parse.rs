@@ -44,7 +44,7 @@ fn long_branch_data_bits(input: Bitstream) -> IResult<Bitstream, BranchData> {
     // need to be explicit about types for this to compile
     let t: (Bitstream, u8) = take_bits(1usize)(input)?;
     let (input, invert_cond) = t;
-    let invert_cond = if invert_cond == 0 { true } else { false };
+    let invert_cond = invert_cond == 0;
 
     // "If bit 6 is clear, then the offset is a signed 14-bit number
     // "given in bits 0 to 5 of the first byte followed by all 8 of the second.
@@ -122,11 +122,11 @@ fn zero_op_instr(input: &[u8]) -> IResult<&[u8], Instr> {
         0x1 => Instr::RFalse,
         0x2 => Instr::Print {
             // TODO
-            zstr: ZStr::from(b"" as &[u8]),
+            ztext: Vec::new(),
         },
         0x3 => Instr::PrintRet {
             // TODO
-            zstr: ZStr::from(b"" as &[u8]),
+            ztext: Vec::new(),
         },
         0x4 => Instr::Nop,
         0x5 => Instr::IllegalZeroOp, // save pre-V5

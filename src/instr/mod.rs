@@ -1,7 +1,5 @@
 pub mod parse;
 
-use super::text::ZStr;
-
 #[derive(Debug, Clone, Copy)]
 pub enum Operand {
     LargeConst(u16),
@@ -35,15 +33,15 @@ pub enum BranchDst {
 }
 
 #[derive(Debug)]
-pub enum Instr<'a> {
+pub enum Instr {
     // zero op
     RTrue,
     RFalse,
     Print {
-        zstr: ZStr<'a>,
+        ztext: Vec<u8>,
     },
     PrintRet {
-        zstr: ZStr<'a>,
+        ztext: Vec<u8>,
     },
     Nop,
     Save,

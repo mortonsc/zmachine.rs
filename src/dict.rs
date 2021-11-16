@@ -3,7 +3,7 @@ use crate::text::{zscii_to_zchars, AlphTable, ZChar, ZStr, Zscii};
 use std::cmp::Ordering;
 use std::iter::once;
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug)]
 pub struct Dictionary<'a> {
     pub word_seps: MemorySlice<'a>,
     table: MemorySlice<'a>,
@@ -33,11 +33,16 @@ impl<'a> Dictionary<'a> {
     }
 
     #[inline]
-    pub fn len(self) -> usize {
+    pub fn len(&self) -> usize {
         self.table.len() / self.entry_len
     }
 
-    pub fn by_index(self, idx: u16) -> DictEntry<'a> {
+    #[inline]
+    pub fn is_empty(&self) -> bool {
+        self.table.is_empty()
+    }
+
+    pub fn by_index(&self, idx: u16) -> DictEntry<'a> {
         let idx = idx as usize;
         let entry_start = idx * self.entry_len;
         let entry_end = entry_start + self.entry_len;
@@ -47,7 +52,7 @@ impl<'a> Dictionary<'a> {
         DictEntry { key, data: entry }
     }
 
-    pub fn by_key(self, key: impl IntoIterator<Item = ZChar>) -> Option<DictEntry<'a>> {
+    pub fn by_key(&self, key: impl IntoIterator<Item = ZChar>) -> Option<DictEntry<'a>> {
         let key = crate::text::zchars_to_dict_key(key.into_iter());
         // binary search (min_idx is inclusive, max_idx exclusive)
         let mut min_idx = 0u16;
@@ -67,7 +72,7 @@ impl<'a> Dictionary<'a> {
     }
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug)]
 pub struct DictEntry<'a> {
     key: ZStr<'a>,
     data: MemorySlice<'a>,
@@ -75,16 +80,16 @@ pub struct DictEntry<'a> {
 
 impl<'a> DictEntry<'a> {
     #[inline]
-    pub fn key(self) -> ZStr<'a> {
+    pub fn key(&self) -> ZStr<'a> {
         self.key
     }
 
     #[inline]
-    pub fn data(self) -> MemorySlice<'a> {
+    pub fn data(&self) -> MemorySlice<'a> {
         self.data
     }
     #[inline]
-    fn byte_addr(self) -> usize {
+    fn byte_addr(&self) -> usize {
         self.data.base_addr - Dictionary::KEY_SIZE
     }
 }
@@ -98,10 +103,7 @@ pub struct ParseData {
 
 impl<'a> Dictionary<'a> {
     fn is_sep(&self, zscii: Zscii) -> bool {
-        self.word_seps
-            .byte_iter()
-            .find(|&&z| z == zscii.0)
-            .is_some()
+        self.word_seps.byte_iter().any(|&z| z == zscii.0)
     }
     fn find_addr_of_entry(&self, word: &[Zscii]) -> Option<usize> {
         // TODO: handle other alphabet tables

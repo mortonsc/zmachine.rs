@@ -11,6 +11,45 @@ use crate::Dictionary;
 
 pub mod parse;
 
+pub struct TextEngine<'a> {
+    alph_table: AlphTable<'a>,
+    abbr_table: AbbrTable<'a>,
+    utt: UnicodeTransTable<'a>,
+}
+
+impl<'a> TextEngine<'a> {
+    pub fn new(
+        alph_table: AlphTable<'a>,
+        abbr_table: AbbrTable<'a>,
+        utt: UnicodeTransTable<'a>,
+    ) -> Self {
+        Self {
+            alph_table,
+            abbr_table,
+            utt,
+        }
+    }
+    pub fn zstr_to_zscii(&'a self, zstr: ZStr<'a>) -> impl Iterator<Item = Zscii> + 'a {
+        let abbr_expander = AbbrExpander::new(zstr.zchars(), &self.abbr_table);
+        abbr_expander.zscii(self.alph_table)
+    }
+    pub fn zscii_to_unicode<I: Iterator<Item = Zscii> + 'a>(
+        &self,
+        zscii: I,
+    ) -> impl Iterator<Item = char> + 'a {
+        zscii.to_unicode(self.utt)
+    }
+    pub fn zstr_to_unicode(&'a self, zstr: ZStr<'a>) -> impl Iterator<Item = char> + 'a {
+        self.zscii_to_unicode(self.zstr_to_zscii(zstr))
+    }
+    pub fn unicode_to_zscii<I: Iterator<Item = char> + 'a>(
+        &'a self,
+        unicode: I,
+    ) -> impl Iterator<Item = Zscii> + 'a {
+        unicode.filter_map(move |c| Zscii::from_unicode(c, self.utt))
+    }
+}
+
 // a ZChar is a 5-bit value
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ZChar(pub u8);
@@ -77,14 +116,19 @@ impl Deref for ZStr<'_> {
 }
 
 impl<'a> ZStr<'a> {
-    #[must_use = "lazy iterator"]
-    pub fn zchars(self) -> impl Iterator<Item = ZChar> + 'a {
+    fn text_words(&self) -> impl Iterator<Item = TextWord> + 'a {
         self.contents
             .chunks_exact(2)
             .map(|pair| u16::from_be_bytes([pair[0], pair[1]]))
             .map_into::<TextWord>()
             .take_until(|tw| tw.is_end)
-            .flat_map(|tw| tw.zchars.into_iter())
+    }
+    #[must_use = "lazy iterator"]
+    pub fn zchars(&self) -> impl Iterator<Item = ZChar> + 'a {
+        self.text_words().flat_map(|tw| tw.zchars.into_iter())
+    }
+    pub fn len_bytes(&self) -> usize {
+        2 * self.text_words().count()
     }
 }
 
@@ -157,18 +201,19 @@ impl<'a> AbbrTable<'a> {
         assert!(row_idx < 3);
         let col_idx = zc2.0 as usize;
         let str_addr = u16::from_be_bytes(self.table[row_idx][col_idx]) as usize;
+        // TODO: the table contains word addrs rather than byte addrs??
         Some(ZStr::from(self.memory.get(str_addr..)?))
     }
 }
 
 struct AbbrExpander<'a, I> {
     zchar_iter: I,
-    abbr_table: AbbrTable<'a>,
+    abbr_table: &'a AbbrTable<'a>,
     abbr_buf: VecDeque<ZChar>,
 }
 
 impl<'a, I> AbbrExpander<'a, I> {
-    fn new(zchar_iter: I, abbr_table: AbbrTable<'a>) -> Self {
+    fn new(zchar_iter: I, abbr_table: &'a AbbrTable<'a>) -> Self {
         AbbrExpander {
             zchar_iter,
             abbr_table,
@@ -298,37 +343,22 @@ impl<'a> AlphTable<'a> {
     }
 }
 
-pub struct ZsciiFromZChars<'a, I> {
+pub struct ZsciiFromZChars<'a, I: Iterator<Item = ZChar>> {
     zchars: I,
-    alph: Alph,
     alph_table: AlphTable<'a>,
 }
 
-impl<'a, I> ZsciiFromZChars<'a, I> {
+impl<'a, I: Iterator<Item = ZChar>> ZsciiFromZChars<'a, I> {
     fn new(zchars: I, alph_table: AlphTable<'a>) -> ZsciiFromZChars<I> {
-        ZsciiFromZChars {
-            zchars,
-            alph: Alph::A0,
-            alph_table,
-        }
+        ZsciiFromZChars { zchars, alph_table }
     }
-}
-
-impl<'a, I: Iterator<Item = ZChar>> Iterator for ZsciiFromZChars<'a, I> {
-    type Item = Zscii;
-    fn next(&mut self) -> Option<Self::Item> {
+    fn next_h(&mut self, alph: Alph) -> Option<Zscii> {
         let zc = self.zchars.next()?;
-        let result = match (self.alph, zc.0) {
+        match (alph, zc.0) {
             (_, 0) => Some(Zscii(b' ')),
             (_, 1..=3) => panic!("Abbreviations not implemented yet"),
-            (_, 4) => {
-                self.alph = Alph::A1;
-                self.next()
-            }
-            (_, 5) => {
-                self.alph = Alph::A2;
-                self.next()
-            }
+            (_, 4) => self.next_h(Alph::A1),
+            (_, 5) => self.next_h(Alph::A2),
             (Alph::A2, 6) => {
                 let first = self.zchars.next()?;
                 let second = self.zchars.next()?;
@@ -338,15 +368,20 @@ impl<'a, I: Iterator<Item = ZChar>> Iterator for ZsciiFromZChars<'a, I> {
                     // skip over invalid compound characters, without stopping the stream
                     // TODO: not sure if this is acceptable behavior
                     // if it's not, will have to change Zscii to be backed by u16
-                    None => self.next(),
+                    None => self.next_h(Alph::A0),
                 }
             }
             (Alph::A2, 7) => Some(Zscii::NEWLINE),
             // this will always be Some(_) because we've handled all the other cases
-            (_, _) => self.alph_table.zchar_to_zscii(zc, self.alph),
-        };
-        self.alph = Alph::A0;
-        result
+            (_, _) => self.alph_table.zchar_to_zscii(zc, alph),
+        }
+    }
+}
+
+impl<'a, I: Iterator<Item = ZChar>> Iterator for ZsciiFromZChars<'a, I> {
+    type Item = Zscii;
+    fn next(&mut self) -> Option<Self::Item> {
+        self.next_h(Alph::A0)
     }
 }
 
@@ -404,7 +439,7 @@ impl<'a> UnicodeTransTable<'a> {
 
     pub fn zscii_to_unicode(&self, zscii: Zscii) -> Option<char> {
         let zcodepoint = zscii.0 as usize;
-        if (zcodepoint < Self::ZSCII_RANGE_START) || (zcodepoint > Self::ZSCII_RANGE_END) {
+        if !(Self::ZSCII_RANGE_START..=Self::ZSCII_RANGE_END).contains(&zcodepoint) {
             return None;
         }
         match self {

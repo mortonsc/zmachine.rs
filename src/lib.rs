@@ -14,7 +14,7 @@ pub use object::{DefaultPropertyTable, Object, ObjectTable, Property, PropertyTa
 
 use std::ops::Deref;
 
-use text::{AlphTable, UnicodeFromZscii, UnicodeTransTable, ZStr, ZsciiDecodable};
+use text::{AbbrTable, AlphTable, TextEngine, UnicodeTransTable, ZStr};
 
 pub enum Version {
     V5,
@@ -40,24 +40,61 @@ impl<'a> ZMachineState<'a> {
             contents: self.memory,
         }
     }
-
+    pub fn header_extension_word(self, index: usize) -> Option<u16> {
+        let header_ext_addr = self.memory().get_word(0x36) as usize;
+        let header_ext_len = self.memory().get_word(header_ext_addr) as usize;
+        if index > header_ext_len {
+            None
+        } else {
+            Some(self.memory().get_word(header_ext_addr + (2 * index)))
+        }
+    }
     #[inline]
     pub fn objects(self) -> ObjectTable<'a> {
         // object table is located immediately after the default prop table in memory
         let byteaddr = self.memory().get_word(0xa) + (DefaultPropertyTable::SIZE as u16);
         ObjectTable::new(self, byteaddr)
     }
-
     #[inline]
     pub fn dictionary(self) -> Dictionary<'a> {
         let byteaddr = self.memory().get_word(0x08);
         Dictionary::new(self, byteaddr)
     }
-
     #[inline]
     pub fn default_properties(self) -> DefaultPropertyTable<'a> {
         let byteaddr = self.memory().get_word(0xa);
         DefaultPropertyTable::new(self, byteaddr)
+    }
+    pub fn alph_table(self) -> AlphTable<'a> {
+        let byteaddr = self.memory().get_word(0x34) as usize;
+        if byteaddr == 0 {
+            AlphTable::Default
+        } else {
+            // TODO: log error if the alphabet table can't be read
+            AlphTable::from_memory(&self.memory[byteaddr..]).unwrap_or(AlphTable::Default)
+        }
+    }
+    pub fn abbr_table(self) -> AbbrTable<'a> {
+        let byteaddr = self.memory().get_word(0x18) as usize;
+        //TODO: handle errors
+        AbbrTable::from_memory(self.memory, byteaddr).unwrap()
+    }
+    pub fn unicode_trans_table(self) -> UnicodeTransTable<'a> {
+        let byteaddr = self.header_extension_word(3);
+        match byteaddr {
+            None | Some(0) => UnicodeTransTable::Default,
+            // TODO: log error if reading the utt from memory fails
+            Some(a) => UnicodeTransTable::from_memory(&self.memory[(a as usize)..])
+                .unwrap_or(UnicodeTransTable::Default),
+        }
+    }
+    pub fn text_engine(self) -> TextEngine<'a> {
+        // TODO: cache some of this stuff if it's in static memory
+        TextEngine::new(
+            self.alph_table(),
+            self.abbr_table(),
+            self.unicode_trans_table(),
+        )
     }
 }
 
@@ -73,6 +110,11 @@ impl<'a> MemorySlice<'a> {
     #[inline]
     pub fn len(self) -> usize {
         self.contents.len()
+    }
+
+    #[inline]
+    pub fn is_empty(self) -> bool {
+        self.contents.is_empty()
     }
 
     #[inline]
@@ -166,6 +208,15 @@ impl<'a> MemorySlice<'a> {
         res
     }
 
+    pub fn take_zstr(&mut self) -> ZStr<'a> {
+        let zstr = ZStr::from(self.contents);
+        let n = zstr.len_bytes();
+        let (_, remaining) = self.contents.split_at(n);
+        self.base_addr += n;
+        self.contents = remaining;
+        zstr
+    }
+
     pub fn get_subslice(self, start_index: usize, end_index: usize) -> Self {
         MemorySlice {
             base_addr: self.base_addr + start_index,
@@ -212,6 +263,7 @@ pub enum WriteData {
 
 pub struct ZMachine<'a> {
     // TODO: add version and other data from header
+    version: Version,
     memory: &'a mut [u8],
     pc: usize,
     call_stack: Vec<StackFrame>,
@@ -221,6 +273,7 @@ impl<'a> ZMachine<'a> {
     #[inline]
     pub fn from_src(src: &'a mut [u8]) -> Self {
         ZMachine {
+            version: Version::V5, // TODO
             memory: src,
             pc: 0, // TODO
             call_stack: Vec::new(),
@@ -240,6 +293,22 @@ impl<'a> ZMachine<'a> {
     fn stack_frame(&mut self) -> &mut StackFrame {
         let idx = self.call_stack.len() - 1;
         &mut self.call_stack[idx]
+    }
+
+    fn routine_paddr_to_byteaddr(&self, paddr: u16) -> usize {
+        match self.version {
+            Version::V5 => 4 * (paddr as usize),
+            Version::V7 => unimplemented!(), // TODO: 4P + 4R_O
+            Version::V8 => 8 * (paddr as usize),
+        }
+    }
+
+    fn string_paddr_to_byteaddr(&self, paddr: u16) -> usize {
+        match self.version {
+            Version::V5 => 4 * (paddr as usize),
+            Version::V7 => unimplemented!(), // TODO: 4P + 4S_O
+            Version::V8 => 8 * (paddr as usize),
+        }
     }
 
     // mutable because variable 0x00 pops the stack
@@ -300,37 +369,20 @@ impl<'a> ZMachine<'a> {
 
     pub fn print_zstr(&self, zstr: ZStr) {
         // TODO: all the stuff about different output streams
-        // TODO: custom alphabet tables
-        // TODO: custom unicode translation tables
-        // TODO: handle abbreviations
-        let unicode_str: String = zstr
-            .zchars()
-            .zscii(AlphTable::Default)
-            .to_unicode(UnicodeTransTable::Default)
-            .collect();
+        let te = self.state().text_engine();
+        let unicode_str: String = te.zstr_to_unicode(zstr).collect();
         print!("{}", unicode_str);
     }
 
     pub fn print_newline(&self) {
         // TODO: different output streams
-        println!("");
+        println!();
     }
 }
 
 #[derive(Debug)]
 struct StackFrame {
     // TODO: not sure what needs to be in this
-    return_addr: usize,
-    return_dst: Option<u8>,
-    n_args: u32,
     locals: Vec<i16>,
     data_stack: Vec<i16>,
-}
-
-#[derive(Debug)]
-enum CtrlFlow {
-    Proceed,
-    Jump { offset: i16 },
-    Return { ret_val: i16 },
-    Call { paddr: u16 },
 }

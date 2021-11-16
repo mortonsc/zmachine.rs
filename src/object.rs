@@ -309,7 +309,7 @@ impl<'a> DefaultPropertyTable<'a> {
     }
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug)]
 pub struct PropertyTable<'a> {
     short_name: ZStr<'a>,
     table: MemorySlice<'a>,
@@ -330,25 +330,32 @@ impl<'a> PropertyTable<'a> {
         }
     }
 
-    pub fn first(self) -> Option<Property<'a>> {
-        self.into_iter().next()
+    pub fn iter(&self) -> PropertyTableIterator<'a> {
+        PropertyTableIterator {
+            prev_id: Property::MAX_ID + 1,
+            table: self.table,
+        }
     }
 
-    pub fn by_id(self, id: u8) -> Option<Property<'a>> {
-        self.into_iter()
+    pub fn first(&self) -> Option<Property<'a>> {
+        self.iter().next()
+    }
+
+    pub fn by_id(&self, id: u8) -> Option<Property<'a>> {
+        self.iter()
             // take advantage of the fact that the table is sorted
             // (in descending order of id)
             .take_while(|p| p.id >= id)
             .find(|p| p.id == id)
     }
 
-    pub fn by_id_with_default(self, id: u8) -> Property<'a> {
+    pub fn by_id_with_default(&self, id: u8) -> Property<'a> {
         self.by_id(id)
             .unwrap_or_else(|| self.zm.default_properties().by_id(id))
     }
 
-    pub fn next_after_id(self, id: u8) -> Option<Property<'a>> {
-        let mut iter = self.into_iter().skip_while(|p| p.id > id);
+    pub fn next_after_id(&self, id: u8) -> Option<Property<'a>> {
+        let mut iter = self.iter().skip_while(|p| p.id > id);
         let current_prop = iter.next();
         // "It is illegal to try to find the next property of a property
         // "which does not exist, and an interpreter should halt with an error message
@@ -369,7 +376,7 @@ impl<'a> PropertyTable<'a> {
     //  which is incomprehensible since the instruction by itself
     //  contains no reference to an object
     //  although in practice it's used along with `get prop_addr object property`
-    pub fn by_byteaddr(self, byteaddr: u16) -> Property<'a> {
+    pub fn by_byteaddr(&self, byteaddr: u16) -> Property<'a> {
         let memory = self.zm.memory();
         let addr = byteaddr as usize;
         let byte_neg1 = memory.get_byte(addr - 1);
@@ -391,10 +398,7 @@ impl<'a> IntoIterator for PropertyTable<'a> {
     type IntoIter = PropertyTableIterator<'a>;
 
     fn into_iter(self) -> Self::IntoIter {
-        PropertyTableIterator {
-            prev_id: Property::MAX_ID + 1,
-            table: self.table,
-        }
+        self.iter()
     }
 }
 
