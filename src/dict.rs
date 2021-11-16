@@ -1,4 +1,4 @@
-use super::{MemorySlice, ZMachineState};
+use super::memory::{MemoryMap, MemorySlice};
 use crate::text::{zscii_to_zchars, AlphTable, ZChar, ZStr, Zscii};
 use std::cmp::Ordering;
 use std::iter::once;
@@ -13,8 +13,8 @@ pub struct Dictionary<'a> {
 impl<'a> Dictionary<'a> {
     pub const KEY_SIZE: usize = 6;
 
-    pub(super) fn new(zm: ZMachineState<'a>, byteaddr: u16) -> Self {
-        let mut table = zm.memory().get_subslice_unbounded(byteaddr as usize);
+    pub(super) fn new(mm: MemoryMap<'a>, byteaddr: u16) -> Self {
+        let mut table = mm.file().get_subslice_unbounded(byteaddr as usize);
         let n_word_seps = table.take_byte();
         // TODO: enforce that <space> can't be a word separator
         let word_seps = table.take_n_bytes(n_word_seps as usize);

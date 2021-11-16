@@ -2,8 +2,9 @@ use std::fs::File;
 use std::io::prelude::*;
 
 use zmachine::instr;
+use zmachine::memory::MemoryMap;
 use zmachine::text::{AbbrTable, AlphTable, UnicodeTransTable, ZChar, ZStr, ZTextEncodable};
-use zmachine::{Dictionary, Object, ObjectTable, ZMachine, ZMachineState};
+use zmachine::{Dictionary, Object, ObjectTable, ZMachine};
 
 fn dump_dictionary(dict: Dictionary) {
     println!("word separators: {:?}", dict.word_seps);
@@ -79,13 +80,13 @@ pub fn dump_objs_seq(objs: ObjectTable) {
     // }
 }
 
-fn lookup_word(zm: ZMachineState, word: &str) {
+fn lookup_word(mm: MemoryMap, word: &str) {
     let key = word
         .chars()
         .encode_ztext(AlphTable::Default, UnicodeTransTable::Default)
         .collect::<Vec<_>>();
     let key = ZStr::from(&key[..]).zchars();
-    let entry = zm.dictionary().by_key(key).unwrap();
+    let entry = mm.dictionary().by_key(key).unwrap();
     let headword = entry
         .key()
         .unicode_chars(AlphTable::Default, UnicodeTransTable::Default)

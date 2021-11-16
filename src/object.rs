@@ -1,7 +1,7 @@
 use crate::text::ZStr;
 use std::cmp;
 
-use super::{MemorySlice, MemoryWrite, ZMachineState};
+use super::memory::{MemoryMap, MemorySlice, MemoryWrite};
 
 // layout of object table in memory:
 // [0..14]: object 1
@@ -14,14 +14,14 @@ use super::{MemorySlice, MemoryWrite, ZMachineState};
 #[derive(Debug, Clone, Copy)]
 pub struct ObjectTable<'a> {
     table: MemorySlice<'a>,
-    zm: ZMachineState<'a>,
+    mm: MemoryMap<'a>,
 }
 
 impl<'a> ObjectTable<'a> {
     #[inline]
-    pub(super) fn new(zm: ZMachineState<'a>, byteaddr: u16) -> Self {
-        let table = zm.memory().get_subslice_unbounded(byteaddr as usize);
-        ObjectTable { zm, table }
+    pub(super) fn new(mm: MemoryMap<'a>, byteaddr: u16) -> Self {
+        let table = mm.file().get_subslice_unbounded(byteaddr as usize);
+        ObjectTable { mm, table }
     }
 
     #[inline]
@@ -43,7 +43,7 @@ impl<'a> ObjectTable<'a> {
         Object {
             id,
             data,
-            zm: self.zm,
+            mm: self.mm,
         }
     }
 
@@ -116,7 +116,7 @@ impl<'a> Iterator for ObjectIterator<'a> {
 pub struct Object<'a> {
     pub id: u16,
     data: MemorySlice<'a>,
-    zm: ZMachineState<'a>,
+    mm: MemoryMap<'a>,
 }
 
 impl<'a> Object<'a> {
@@ -151,7 +151,7 @@ impl<'a> Object<'a> {
         if parent_id == 0 {
             None
         } else {
-            Some(self.zm.objects().by_id(parent_id))
+            Some(self.mm.objects().by_id(parent_id))
         }
     }
 
@@ -160,7 +160,7 @@ impl<'a> Object<'a> {
         if sibling_id == 0 {
             None
         } else {
-            Some(self.zm.objects().by_id(sibling_id))
+            Some(self.mm.objects().by_id(sibling_id))
         }
     }
 
@@ -169,7 +169,7 @@ impl<'a> Object<'a> {
         if child_id == 0 {
             None
         } else {
-            Some(self.zm.objects().by_id(child_id))
+            Some(self.mm.objects().by_id(child_id))
         }
     }
 
@@ -182,7 +182,7 @@ impl<'a> Object<'a> {
 
     #[inline]
     pub fn properties(self) -> PropertyTable<'a> {
-        PropertyTable::new(self.zm, self.prop_table_byteaddr())
+        PropertyTable::new(self.mm, self.prop_table_byteaddr())
     }
 
     #[inline]
@@ -292,11 +292,11 @@ impl<'a> DefaultPropertyTable<'a> {
     pub(super) const SIZE: usize =
         Property::DEFAULT_SIZE * ((Property::MAX_ID - Property::MIN_ID + 1) as usize);
 
-    pub(super) fn new(zm: ZMachineState<'a>, byteaddr: u16) -> Self {
+    pub(super) fn new(mm: MemoryMap<'a>, byteaddr: u16) -> Self {
         let start = byteaddr as usize;
         let end = start + Self::SIZE;
         DefaultPropertyTable {
-            table: zm.memory().get_subslice(start, end),
+            table: mm.file().get_subslice(start, end),
         }
     }
 
@@ -313,12 +313,12 @@ impl<'a> DefaultPropertyTable<'a> {
 pub struct PropertyTable<'a> {
     short_name: ZStr<'a>,
     table: MemorySlice<'a>,
-    zm: ZMachineState<'a>,
+    mm: MemoryMap<'a>,
 }
 
 impl<'a> PropertyTable<'a> {
-    fn new(zm: ZMachineState<'a>, byteaddr: u16) -> Self {
-        let mut table = zm.memory().get_subslice_unbounded(byteaddr as usize);
+    fn new(mm: MemoryMap<'a>, byteaddr: u16) -> Self {
+        let mut table = mm.file().get_subslice_unbounded(byteaddr as usize);
         let name_len_words = table.take_byte();
         let name_len_bytes = 2 * (name_len_words as usize);
         let short_name = table.take_n_bytes(name_len_bytes);
@@ -326,7 +326,7 @@ impl<'a> PropertyTable<'a> {
         PropertyTable {
             short_name,
             table,
-            zm,
+            mm,
         }
     }
 
@@ -351,7 +351,7 @@ impl<'a> PropertyTable<'a> {
 
     pub fn by_id_with_default(&self, id: u8) -> Property<'a> {
         self.by_id(id)
-            .unwrap_or_else(|| self.zm.default_properties().by_id(id))
+            .unwrap_or_else(|| self.mm.default_properties().by_id(id))
     }
 
     pub fn next_after_id(&self, id: u8) -> Option<Property<'a>> {
@@ -377,7 +377,7 @@ impl<'a> PropertyTable<'a> {
     //  contains no reference to an object
     //  although in practice it's used along with `get prop_addr object property`
     pub fn by_byteaddr(&self, byteaddr: u16) -> Property<'a> {
-        let memory = self.zm.memory();
+        let memory = self.mm.file();
         let addr = byteaddr as usize;
         let byte_neg1 = memory.get_byte(addr - 1);
         let (id, data_len) = if (byte_neg1 & 0x80) != 0 {
