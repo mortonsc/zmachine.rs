@@ -5,8 +5,9 @@ use nom::bits::bits;
 use nom::bits::complete::tag as tag_bits;
 use nom::bits::complete::take as take_bits;
 use nom::branch::alt;
-use nom::bytes::complete::tag;
+use nom::bytes::complete::{tag, take};
 use nom::combinator::{map, not, verify};
+use nom::multi::count;
 use nom::number::complete::{be_i16, be_i8, be_u16, be_u8};
 use nom::sequence::preceded;
 use nom::IResult;
@@ -16,7 +17,7 @@ type Bitstream<'a> = (&'a [u8], usize);
 
 pub fn decode_instr(input: &[u8]) -> IResult<&[u8], Instr> {
     // TODO: other types of instruction
-    alt((zero_op_instr, one_op_instr))(input)
+    alt((zero_op_instr, one_op_instr, two_op_instr))(input)
 }
 
 fn operand_type_bits(input: Bitstream) -> IResult<Bitstream, OperandType> {
@@ -231,6 +232,116 @@ fn zero_op_instr(input: &[u8]) -> IResult<&[u8], Instr> {
         0x10..=0xff => panic!("parser should emit a 4-bit opcode"),
     };
     Ok((input, instr))
+}
+
+fn operand_type_single_bit(input: Bitstream) -> IResult<Bitstream, OperandType> {
+    let (input, spec) = take_bits(1usize)(input)?;
+    let op_type = match spec {
+        0b0 => OperandType::SmallConst,
+        0b1 => OperandType::Variable,
+        _ => panic!(),
+    };
+    Ok((input, op_type))
+}
+
+fn long_two_op_bits(input: Bitstream) -> IResult<Bitstream, (OperandType, OperandType, u8)> {
+    // long format marked by 0 as first bit
+    let (input, _) = tag_bits(0b0, 1usize)(input)?;
+    let (input, op1) = operand_type_single_bit(input)?;
+    let (input, op2) = operand_type_single_bit(input)?;
+    let (input, opcode) = take_bits(5usize)(input)?;
+    Ok((input, (op1, op2, opcode)))
+}
+
+fn var_two_op_bits(input: Bitstream) -> IResult<Bitstream, (OperandType, OperandType, u8)> {
+    // 11 means var format, 0 means two op instruction
+    let (input, _) = tag_bits(0b110, 3usize)(input)?;
+    let (input, opcode) = take_bits(5usize)(input)?;
+    let (input, op_types) = op_type_field(input, 1)?;
+    if op_types.len() != 2 {
+        // TODO: do through nom's error handling
+        // TODO: JE can take more than two operands?
+        panic!("two op instruction needs exactly two operands");
+    }
+    Ok((input, (op_types[0], op_types[1], opcode)))
+}
+
+fn two_op_instr(input: &[u8]) -> IResult<&[u8], Instr> {
+    // TODO: also account for var op format
+    let (input, (op_type1, op_type2, opcode)) =
+        bits(alt((long_two_op_bits, var_two_op_bits)))(input)?;
+    let (input, op1) = take_operand(input, op_type1)?;
+    let (input, op2) = take_operand(input, op_type2)?;
+    let op1 = op1.unwrap();
+    let op2 = op2.unwrap();
+    let instr = match opcode {
+        0x00..=0x1f => unimplemented!(),
+        0x20..=0xff => panic!("parser should return a 5-bit opcode"),
+    };
+    Ok((input, instr))
+}
+
+fn var_op_bits(input: Bitstream) -> IResult<Bitstream, (Vec<OperandType>, u8)> {
+    // 11 means var format, 1 means var op instruction
+    let (input, _) = tag_bits(0b111, 3usize)(input)?;
+    let (input, opcode) = take_bits(5usize)(input)?;
+    // TODO: account for call_vs2 and call_vn2 which take two bytes of arguments
+    let (input, op_types) = op_type_field(input, 1)?;
+    Ok((input, (op_types, opcode)))
+}
+
+fn var_op_instr(input: &[u8]) -> IResult<&[u8], Instr> {
+    let (mut input, (op_types, opcode)) = bits(var_op_bits)(input)?;
+    let mut operands: Vec<Operand> = Vec::new();
+    for op_type in op_types {
+        let (new_input, op) = take_operand(input, op_type)?;
+        operands.push(op.unwrap());
+        input = new_input;
+    }
+    let instr = match opcode {
+        0x00..=0x1f => unimplemented!(),
+        0x20..=0xff => panic!("parser should return a 5-bit opcode"),
+    };
+    Ok((input, instr))
+}
+
+fn extended_op(input: &[u8]) -> IResult<&[u8], (Vec<OperandType>, u8)> {
+    let (input, _) = tag([0xbe])(input)?;
+    let (input, opcode) = take(1usize)(input)?;
+    let opcode = opcode[0];
+    let (input, op_types) = bits(|input| op_type_field(input, 1))(input)?;
+    Ok((input, (op_types, opcode)))
+}
+
+fn extended_op_instr(input: &[u8]) -> IResult<&[u8], Instr> {
+    let (mut input, (op_types, opcode)) = extended_op(input)?;
+    let mut operands: Vec<Operand> = Vec::new();
+    for op_type in op_types {
+        let (new_input, op) = take_operand(input, op_type)?;
+        operands.push(op.unwrap());
+        input = new_input;
+    }
+    let instr = match opcode {
+        0x00..=0xff => unimplemented!(),
+    };
+    Ok((input, instr))
+}
+
+fn op_type_field(input: Bitstream, n_bytes: usize) -> IResult<Bitstream, Vec<OperandType>> {
+    let (input, mut op_types) = count(operand_type_bits, 4 * n_bytes)(input)?;
+    let n_ops = op_types
+        .iter()
+        .take_while(|&&op_type| op_type != OperandType::Omitted)
+        .count();
+    if op_types[n_ops..]
+        .iter()
+        .any(|&op_type| op_type != OperandType::Omitted)
+    {
+        // TODO: do this through nom's error handling
+        panic!("Invalidly formed operand specifier");
+    }
+    op_types.truncate(n_ops);
+    Ok((input, op_types))
 }
 
 pub fn test() {
