@@ -1,3 +1,4 @@
+pub mod opcode;
 pub mod parse;
 
 pub const SP: u8 = 0x00;
@@ -198,6 +199,21 @@ pub enum Instr {
         byte_index: Operand,
         dst: u8,
     },
+    GetProp {
+        obj_id: Operand,
+        prop: Operand,
+        dst: u8,
+    },
+    GetPropAddr {
+        obj_id: Operand,
+        prop: Operand,
+        dst: u8,
+    },
+    GetNextProp {
+        obj_id: Operand,
+        prop: Operand,
+        dst: u8,
+    },
     Add {
         a: Operand,
         b: Operand,
@@ -223,21 +239,6 @@ pub enum Instr {
         b: Operand,
         dst: u8,
     },
-    GetProp {
-        obj_id: Operand,
-        prop: Operand,
-        dst: u8,
-    },
-    GetPropAddr {
-        obj_id: Operand,
-        prop: Operand,
-        dst: u8,
-    },
-    GetNextProp {
-        obj_id: Operand,
-        prop: Operand,
-        dst: u8,
-    },
     Call2S {
         routine_paddr: Operand,
         arg1: Operand,
@@ -255,6 +256,9 @@ pub enum Instr {
         ret_val: Operand,
         catch_frame: Operand,
     },
+    IllegalTwoOp {
+        opcode: u8,
+    },
 
     // var ops
     CallVS {
@@ -262,11 +266,60 @@ pub enum Instr {
         args: Vec<Operand>,
         dst: u8,
     },
-    CallVN {
+    StoreW {
+        array: Operand,
+        word_index: Operand,
+        val: Operand,
+    },
+    StoreB {
+        array: Operand,
+        byte_index: Operand,
+        val: Operand,
+    },
+    PutProp {
+        obj_id: Operand,
+        prop: Operand,
+        val: Operand,
+    },
+    ARead {
+        text: Operand,
+        parse: Operand,
+        time: Operand,
         routine_paddr: Operand,
-        args: Vec<Operand>,
+        dst: u8,
+    },
+    PrintChar {
+        zscii_code: Operand,
+    },
+    PrintNum {
+        val: Operand,
+    },
+    Random {
+        range: Operand,
+        dst: u8,
+    },
+    Push {
+        val: Operand,
     },
     Pull {
         var_by_ref: Operand,
+    },
+    SplitWindow {
+        lines: Operand,
+    },
+    SetWindow {
+        window: Operand,
+    },
+    CallVS2 {
+        routine_paddr: Operand,
+        args: Vec<Operand>,
+    },
+    EraseWindow {
+        window: Operand,
+    },
+    // more..
+    CallVN {
+        routine_paddr: Operand,
+        args: Vec<Operand>,
     },
 }
