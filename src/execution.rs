@@ -1,8 +1,8 @@
 use super::debug;
 use super::instr::parse::decode_instr;
 use super::instr::{BranchData, BranchDst, Instr, Operand, SP};
+use super::memory::*;
 use super::text::ZStr;
-use super::ZMachine;
 
 #[derive(Debug)]
 pub struct StackFrame {
@@ -24,6 +24,9 @@ pub enum ErrorKind {
     InvalidLocal(u8),
     InvalidNumLocals(u8),
     InvalidStackFrame(usize),
+    RoutineAddrOutOfBounds(usize),
+    ByteAddrOutOfBounds(usize),
+    IllegalWrite(usize),
     DecodingFailed, // TODO: pass some data along
     ExecutionFinished,
 }
@@ -66,13 +69,15 @@ impl CtrlFlow {
 }
 
 pub struct ProgramState<'a> {
-    pub zm: &'a mut ZMachine<'a>,
+    pub mm: &'a mut MemoryMap<'a>,
     pub pc: Option<usize>,
     pub call_stack: Vec<StackFrame>,
 }
 
-impl<'a> ZMachine<'a> {
-    pub fn initial_program_state(&'a mut self) -> ProgramState {
+impl<'a> ProgramState<'a> {
+    pub const MAX_N_LOCALS: u8 = 15;
+
+    pub fn new(mm: &'a mut MemoryMap<'a>) -> Self {
         let initial_frame = StackFrame {
             ret_addr: 0,
             ret_dst: None,
@@ -80,17 +85,13 @@ impl<'a> ZMachine<'a> {
             locals: Vec::new(),
             data_stack: Vec::new(),
         };
-        let pc = self.read_word(0x06) as usize;
+        let pc = mm.read_word(0x06).unwrap() as usize;
         ProgramState {
-            zm: self,
+            mm,
             pc: Some(pc),
             call_stack: vec![initial_frame],
         }
     }
-}
-
-impl<'a> ProgramState<'a> {
-    pub const MAX_N_LOCALS: u8 = 15;
 
     pub fn debug_context(self) -> debug::Context<'a> {
         debug::Context::new(self)
@@ -129,12 +130,12 @@ impl<'a> ProgramState<'a> {
 
     fn operand_as_routine_paddr(&mut self, op: Operand) -> ExeResult<usize> {
         self.operand_as_value(op)
-            .map(|op| self.zm.routine_paddr_to_byteaddr(op as u16 as usize))
+            .map(|op| self.mm.routine_paddr_to_byteaddr(op as u16 as usize))
     }
 
     fn operand_as_string_paddr(&mut self, op: Operand) -> ExeResult<usize> {
         self.operand_as_value(op)
-            .map(|op| self.zm.string_paddr_to_byteaddr(op as u16 as usize))
+            .map(|op| self.mm.string_paddr_to_byteaddr(op as u16 as usize))
     }
 
     // mutable because variable 0x00 pops the stack
@@ -172,7 +173,7 @@ impl<'a> ProgramState<'a> {
                 .get((var - 1) as usize)
                 .copied()
                 .ok_or(ErrorKind::InvalidLocal(var)),
-            0x10..=0xff => Ok(self.zm.read_word(self.zm.byteaddr_of_global(var)) as i16),
+            0x10..=0xff => Ok(self.mm.read_word(self.mm.byteaddr_of_global(var)).unwrap() as i16),
         }
     }
 
@@ -193,8 +194,8 @@ impl<'a> ProgramState<'a> {
                     .ok_or(ErrorKind::InvalidLocal(var))? = val;
             }
             0x10..=0xff => {
-                self.zm
-                    .write_word(self.zm.byteaddr_of_global(var), val as u16);
+                self.mm
+                    .apply_write_word(self.mm.byteaddr_of_global(var), val as u16);
             }
         };
         Ok(())
@@ -209,7 +210,7 @@ impl<'a> ProgramState<'a> {
     // returns the pc of the next instruction to execute
     // or None if this instruction was a quit
     pub fn step_at(&mut self, pc: usize) -> ExeResult<Option<usize>> {
-        let code = &self.zm.memory[pc..];
+        let code = &self.mm.contents()[pc..];
         // TODO: preserve data about the encoding error
         let (new_code, instr) = decode_instr(code).map_err(|_| ErrorKind::DecodingFailed)?;
         let instr_len = code.len() - new_code.len();
@@ -264,7 +265,10 @@ impl<'a> ProgramState<'a> {
             locals: args,
             data_stack: Vec::new(),
         };
-        let n_locals = self.zm.memory_map().file().get_byte(byteaddr);
+        let n_locals = self
+            .mm
+            .read_byte(byteaddr)
+            .ok_or(ErrorKind::RoutineAddrOutOfBounds(byteaddr))?;
         // TODO error handling
         if n_locals > Self::MAX_N_LOCALS {
             return Err(ErrorKind::InvalidNumLocals(n_locals));
@@ -292,7 +296,7 @@ impl<'a> ProgramState<'a> {
 
     fn print_zstr(&self, zstr: ZStr) {
         // TODO: all the stuff about different output streams
-        let te = self.zm.memory_map().text_engine();
+        let te = self.mm.text_engine();
         let unicode_str: String = te.zstr_to_unicode(zstr).collect();
         print!("{}", unicode_str);
     }
@@ -341,19 +345,19 @@ impl<'a> ProgramState<'a> {
             }
             Instr::GetSibling { obj_id, dst, bdata } => {
                 let obj_id = self.operand_as_value(obj_id)? as u16;
-                let sib_id = self.zm.memory_map().objects().by_id(obj_id).sibling_id();
+                let sib_id = self.mm.objects().by_id(obj_id).sibling_id();
                 self.set_var_by_value(dst, sib_id as i16)?;
                 Ok(CtrlFlow::branch(sib_id != 0, bdata))
             }
             Instr::GetChild { obj_id, dst, bdata } => {
                 let obj_id = self.operand_as_value(obj_id)? as u16;
-                let child_id = self.zm.memory_map().objects().by_id(obj_id).child_id();
+                let child_id = self.mm.objects().by_id(obj_id).child_id();
                 self.set_var_by_value(dst, child_id as i16)?;
                 Ok(CtrlFlow::branch(child_id != 0, bdata))
             }
             Instr::GetParent { obj_id, dst } => {
                 let obj_id = self.operand_as_value(obj_id)? as u16;
-                let parent_id = self.zm.memory_map().objects().by_id(obj_id).parent_id();
+                let parent_id = self.mm.objects().by_id(obj_id).parent_id();
                 self.set_var_by_value(dst, parent_id as i16)?;
                 Ok(CtrlFlow::Proceed)
             }
@@ -371,23 +375,18 @@ impl<'a> ProgramState<'a> {
             }
             Instr::PrintAddr { zstr_byteaddr } => {
                 let zstr_byteaddr = self.operand_as_byteaddr(zstr_byteaddr)?;
-                self.print_zstr(ZStr::from(&self.zm.memory[zstr_byteaddr..]));
+                self.print_zstr(ZStr::from(&self.mm.contents()[zstr_byteaddr..]));
                 Ok(CtrlFlow::Proceed)
             }
             Instr::RemoveObj { obj_id } => {
                 let obj_id = self.operand_as_value(obj_id)? as u16;
-                let writes = self
-                    .zm
-                    .memory_map()
-                    .objects()
-                    .by_id(obj_id)
-                    .remove_from_parent();
-                self.zm.apply_all(&writes[..]);
+                let writes = self.mm.objects().by_id(obj_id).remove_from_parent();
+                self.mm.apply_all(&writes[..]);
                 Ok(CtrlFlow::Proceed)
             }
             Instr::PrintObj { obj_id } => {
                 let obj_id = self.operand_as_value(obj_id)? as u16;
-                let name = self.zm.memory_map().objects().by_id(obj_id).short_name();
+                let name = self.mm.objects().by_id(obj_id).short_name();
                 self.print_zstr(name);
                 Ok(CtrlFlow::Proceed)
             }
@@ -399,7 +398,7 @@ impl<'a> ProgramState<'a> {
             }),
             Instr::PrintPAddr { zstr_paddr } => {
                 let byteaddr = self.operand_as_string_paddr(zstr_paddr)?;
-                self.print_zstr(ZStr::from(&self.zm.memory[byteaddr..]));
+                self.print_zstr(ZStr::from(&self.mm.contents()[byteaddr..]));
                 Ok(CtrlFlow::Proceed)
             }
             Instr::Load { var_by_ref, dst } => {
@@ -463,7 +462,7 @@ impl<'a> ProgramState<'a> {
             Instr::JIn { obj1, obj2, bdata } => {
                 let obj1 = self.operand_as_value(obj1)? as u16;
                 let obj2 = self.operand_as_value(obj2)? as u16;
-                let is_child = self.zm.memory_map().objects().by_id(obj1).parent_id() == obj2;
+                let is_child = self.mm.objects().by_id(obj1).parent_id() == obj2;
                 Ok(CtrlFlow::branch(is_child, bdata))
             }
             Instr::Test {
@@ -491,7 +490,7 @@ impl<'a> ProgramState<'a> {
             } => {
                 let obj_id = self.operand_as_value(obj_id)? as u16;
                 let attr = self.operand_as_value(attr)? as u16 as usize;
-                let attr_set = self.zm.memory_map().objects().by_id(obj_id).test_attr(attr);
+                let attr_set = self.mm.objects().by_id(obj_id).test_attr(attr);
                 Ok(CtrlFlow::branch(attr_set, bdata))
             }
             Instr::Store { var_by_ref, val } => {
@@ -507,7 +506,12 @@ impl<'a> ProgramState<'a> {
             } => {
                 let array = self.operand_as_byteaddr(array)?;
                 let byte_index = 2 * self.operand_as_byteaddr(word_index)?;
-                let val = self.zm.read_word(array + byte_index) as i16;
+                let byteaddr = array + byte_index;
+                let val = self
+                    .mm
+                    .read_word(byteaddr)
+                    .ok_or(ErrorKind::ByteAddrOutOfBounds(byteaddr))?
+                    as i16;
                 self.set_var_by_value(dst, val)?;
                 Ok(CtrlFlow::Proceed)
             }
@@ -518,8 +522,13 @@ impl<'a> ProgramState<'a> {
             } => {
                 let array = self.operand_as_byteaddr(array)?;
                 let byte_index = self.operand_as_byteaddr(byte_index)?;
+                let byteaddr = array + byte_index;
                 // TODO: not clear whether this should be sign-extended?
-                let val = self.zm.read_byte(array + byte_index) as i8 as i16;
+                let val = self
+                    .mm
+                    .read_byte(byteaddr)
+                    .ok_or(ErrorKind::ByteAddrOutOfBounds(byteaddr))?
+                    as i8 as i16;
                 self.set_var_by_value(dst, val)?;
                 Ok(CtrlFlow::Proceed)
             }

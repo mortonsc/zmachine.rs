@@ -1,10 +1,10 @@
 use std::fs::File;
 use std::io::prelude::*;
 
-use zmachine::instr;
+use zmachine::execution::ProgramState;
 use zmachine::memory::MemoryMap;
 use zmachine::text::{AbbrTable, AlphTable, UnicodeTransTable, ZChar, ZStr, ZTextEncodable};
-use zmachine::{Dictionary, Object, ObjectTable, ZMachine};
+use zmachine::{Dictionary, Object, ObjectTable};
 
 fn dump_dictionary(dict: Dictionary) {
     println!("word separators: {:?}", dict.word_seps);
@@ -98,8 +98,8 @@ fn main() {
     let mut f = File::open("assets/AllRoads.z5").unwrap();
     let mut src = Vec::new();
     f.read_to_end(&mut src).unwrap();
-    let mut zmach = ZMachine::from_src(&mut src);
-    let ps = zmach.initial_program_state();
+    let mut mm = MemoryMap::from_src(&mut src[..]).unwrap();
+    let ps = ProgramState::new(&mut mm);
     let mut debug = ps.debug_context();
     debug.repl();
 }

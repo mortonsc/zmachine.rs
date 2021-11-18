@@ -1,5 +1,6 @@
 use super::execution::ProgramState;
 use super::instr::parse::decode_instr;
+use super::memory::*;
 use super::text::ZStr;
 use std::convert::TryFrom;
 use std::io::{stdin, stdout, Write};
@@ -119,13 +120,7 @@ impl<'a> Context<'a> {
             Command::PrintZStr(exp) => {
                 let bytes = self.get_slice(&exp)?;
                 let zstr = ZStr::from(bytes);
-                let unicode: String = self
-                    .ps
-                    .zm
-                    .memory_map()
-                    .text_engine()
-                    .zstr_to_unicode(zstr)
-                    .collect();
+                let unicode: String = self.ps.mm.text_engine().zstr_to_unicode(zstr).collect();
                 println!("{}", unicode);
                 Some(0)
             }
@@ -141,10 +136,8 @@ impl<'a> Context<'a> {
     fn value_as_i64_h(&self, exp: ShallowNumericExpr) -> Option<i64> {
         match exp {
             ShallowNumericExpr::Literal(val) => Some(val),
-            ShallowNumericExpr::IndirectAddrB(addr) => Some(self.ps.zm.read_byte(addr) as i64),
-            ShallowNumericExpr::IndirectAddrW(addr) => {
-                Some(self.ps.zm.read_word(addr) as i16 as i64)
-            }
+            ShallowNumericExpr::IndirectAddrB(addr) => self.ps.mm.read_byte(addr).map(|n| n as i64),
+            ShallowNumericExpr::IndirectAddrW(addr) => self.ps.mm.read_word(addr).map(|n| n as i64),
             ShallowNumericExpr::VarAccess(var) => {
                 self.ps.get_var_by_ref(var).ok().map(|v| v as i64)
             }
@@ -167,7 +160,7 @@ impl<'a> Context<'a> {
         match exp {
             // special cases to treat these values as unsigned
             ShallowNumericExpr::IndirectAddrW(addr) => {
-                Some(self.ps.zm.read_word(addr) as u16 as usize)
+                self.ps.mm.read_word(addr).map(|n| n as u16 as usize)
             }
             ShallowNumericExpr::VarAccess(var) => {
                 let val = self.ps.get_var_by_ref(var).ok()?;
@@ -202,17 +195,17 @@ impl<'a> Context<'a> {
             BytesExpr::Literal(bytes) => Some(&bytes[..]),
             BytesExpr::IndirectAddr(addr_expr) => {
                 let byteaddr = self.value_as_byteaddr(addr_expr)?;
-                Some(&self.ps.zm.memory[byteaddr..])
+                Some(&self.ps.mm.contents()[byteaddr..])
             }
             BytesExpr::IndirectPAddrR(addr_expr) => {
                 let paddr = self.value_as_byteaddr(addr_expr)?;
-                let byteaddr = self.ps.zm.routine_paddr_to_byteaddr(paddr);
-                Some(&self.ps.zm.memory[byteaddr..])
+                let byteaddr = self.ps.mm.routine_paddr_to_byteaddr(paddr);
+                Some(&self.ps.mm.contents()[byteaddr..])
             }
             BytesExpr::IndirectPAddrS(addr_expr) => {
                 let paddr = self.value_as_byteaddr(addr_expr)?;
-                let byteaddr = self.ps.zm.string_paddr_to_byteaddr(paddr);
-                Some(&self.ps.zm.memory[byteaddr..])
+                let byteaddr = self.ps.mm.string_paddr_to_byteaddr(paddr);
+                Some(&self.ps.mm.contents()[byteaddr..])
             }
         }
     }

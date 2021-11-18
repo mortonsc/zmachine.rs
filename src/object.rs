@@ -1,7 +1,7 @@
 use crate::text::ZStr;
 use std::cmp;
 
-use super::memory::{MemoryMap, MemorySlice, MemoryWrite};
+use super::memory::*;
 
 // layout of object table in memory:
 // [0..14]: object 1
@@ -14,25 +14,25 @@ use super::memory::{MemoryMap, MemorySlice, MemoryWrite};
 #[derive(Debug, Clone, Copy)]
 pub struct ObjectTable<'a> {
     table: MemorySlice<'a>,
-    mm: MemoryMap<'a>,
+    mm: &'a MemoryMap<'a>,
 }
 
 impl<'a> ObjectTable<'a> {
     #[inline]
-    pub(super) fn new(mm: MemoryMap<'a>, byteaddr: u16) -> Self {
+    pub(super) fn new(mm: &'a MemoryMap<'a>, byteaddr: u16) -> Self {
         let table = mm.file().get_subslice_unbounded(byteaddr as usize);
         ObjectTable { mm, table }
     }
 
     #[inline]
-    fn object_id_to_byteaddr(self, id: u16) -> u16 {
-        self.table.byteaddr() + (Object::SIZE * id)
+    fn object_id_to_byteaddr(self, id: u16) -> usize {
+        self.table.base_byteaddr() + ((Object::SIZE * id) as usize)
     }
 
     // needed as a helper for guess_max_id()
     #[inline]
-    fn byteaddr_to_object_id(self, byteaddr: u16) -> u16 {
-        (byteaddr - self.table.byteaddr()) / Object::SIZE
+    fn byteaddr_to_object_id(self, byteaddr: usize) -> u16 {
+        ((byteaddr - self.table.base_byteaddr()) / (Object::SIZE as usize)) as u16
     }
 
     pub fn by_id(self, id: u16) -> Object<'a> {
@@ -51,14 +51,14 @@ impl<'a> ObjectTable<'a> {
     // by assuming that a property table immediately follows the object table
     // method suggested by the zmachine spec
     pub fn guess_max_id(self) -> u16 {
-        let mut min_prop_addr = std::u16::MAX;
+        let mut min_prop_addr = std::u16::MAX as usize;
         for id in 1..=std::u16::MAX {
             let obj_addr = self.object_id_to_byteaddr(id);
             if min_prop_addr < obj_addr {
                 return self.byteaddr_to_object_id(min_prop_addr);
             }
-            let prop_addr = self.by_id(id).prop_table_byteaddr();
-            if prop_addr < self.table.byteaddr() {
+            let prop_addr = self.by_id(id).prop_table_byteaddr() as usize;
+            if prop_addr < self.table.base_byteaddr() {
                 continue;
             }
             min_prop_addr = cmp::min(prop_addr, min_prop_addr);
@@ -71,7 +71,7 @@ impl<'a> ObjectTable<'a> {
 pub struct ObjectIterator<'a> {
     objects: ObjectTable<'a>,
     next_id: u16,
-    table_lower_bound: u16,
+    table_lower_bound: usize,
 }
 
 impl<'a> IntoIterator for ObjectTable<'a> {
@@ -82,7 +82,7 @@ impl<'a> IntoIterator for ObjectTable<'a> {
         ObjectIterator {
             objects: self,
             next_id: 1,
-            table_lower_bound: u16::max_value(),
+            table_lower_bound: u16::max_value() as usize,
         }
     }
 }
@@ -92,12 +92,12 @@ impl<'a> Iterator for ObjectIterator<'a> {
 
     fn next(&mut self) -> Option<Self::Item> {
         let obj = self.objects.by_id(self.next_id);
-        if obj.data.byteaddr() >= self.table_lower_bound {
+        if obj.data.base_byteaddr() >= self.table_lower_bound {
             return None;
         }
 
         let prop_addr = obj.prop_table_byteaddr();
-        if prop_addr > self.objects.table.byteaddr() {
+        if prop_addr > self.objects.table.base_byteaddr() {
             self.table_lower_bound = cmp::min(prop_addr, self.table_lower_bound);
         }
         self.next_id += 1;
@@ -116,7 +116,7 @@ impl<'a> Iterator for ObjectIterator<'a> {
 pub struct Object<'a> {
     pub id: u16,
     data: MemorySlice<'a>,
-    mm: MemoryMap<'a>,
+    mm: &'a MemoryMap<'a>,
 }
 
 impl<'a> Object<'a> {
@@ -128,22 +128,22 @@ impl<'a> Object<'a> {
 
     #[inline]
     pub fn parent_id(self) -> u16 {
-        self.data.get_word(Self::PARENT_ID_OFFSET)
+        self.data.read_word(Self::PARENT_ID_OFFSET).unwrap()
     }
 
     #[inline]
     pub fn sibling_id(self) -> u16 {
-        self.data.get_word(Self::SIBLING_ID_OFFSET)
+        self.data.read_word(Self::SIBLING_ID_OFFSET).unwrap()
     }
 
     #[inline]
     pub fn child_id(self) -> u16 {
-        self.data.get_word(Self::CHILD_ID_OFFSET)
+        self.data.read_word(Self::CHILD_ID_OFFSET).unwrap()
     }
 
     #[inline]
-    fn prop_table_byteaddr(self) -> u16 {
-        self.data.get_word(Self::PROP_TABLE_OFFSET)
+    fn prop_table_byteaddr(self) -> usize {
+        self.data.read_word(Self::PROP_TABLE_OFFSET).unwrap() as usize
     }
 
     pub fn parent(self) -> Option<Object<'a>> {
@@ -182,7 +182,7 @@ impl<'a> Object<'a> {
 
     #[inline]
     pub fn properties(self) -> PropertyTable<'a> {
-        PropertyTable::new(self.mm, self.prop_table_byteaddr())
+        PropertyTable::new(self.mm, self.prop_table_byteaddr()).unwrap()
     }
 
     #[inline]
@@ -193,7 +193,7 @@ impl<'a> Object<'a> {
     pub fn test_attr(self, attr: usize) -> bool {
         let byte_num = 5 - (attr / 8);
         let bit_num = attr % 8;
-        (self.data.get_byte(byte_num) & (1 << bit_num)) != 0
+        (self.data.read_byte(byte_num).unwrap() & (1 << bit_num)) != 0
     }
 
     #[inline]
@@ -292,7 +292,7 @@ impl<'a> DefaultPropertyTable<'a> {
     pub(super) const SIZE: usize =
         Property::DEFAULT_SIZE * ((Property::MAX_ID - Property::MIN_ID + 1) as usize);
 
-    pub(super) fn new(mm: MemoryMap<'a>, byteaddr: u16) -> Self {
+    pub(super) fn new(mm: &'a MemoryMap<'a>, byteaddr: u16) -> Self {
         let start = byteaddr as usize;
         let end = start + Self::SIZE;
         DefaultPropertyTable {
@@ -313,21 +313,21 @@ impl<'a> DefaultPropertyTable<'a> {
 pub struct PropertyTable<'a> {
     short_name: ZStr<'a>,
     table: MemorySlice<'a>,
-    mm: MemoryMap<'a>,
+    mm: &'a MemoryMap<'a>,
 }
 
 impl<'a> PropertyTable<'a> {
-    fn new(mm: MemoryMap<'a>, byteaddr: u16) -> Self {
-        let mut table = mm.file().get_subslice_unbounded(byteaddr as usize);
-        let name_len_words = table.take_byte();
+    fn new(mm: &'a MemoryMap<'a>, byteaddr: usize) -> Option<Self> {
+        let mut table = mm.file().get_subslice_unbounded(byteaddr);
+        let name_len_words = table.take_byte()?;
         let name_len_bytes = 2 * (name_len_words as usize);
         let short_name = table.take_n_bytes(name_len_bytes);
         let short_name = ZStr::from(short_name);
-        PropertyTable {
+        Some(PropertyTable {
             short_name,
             table,
             mm,
-        }
+        })
     }
 
     pub fn iter(&self) -> PropertyTableIterator<'a> {
@@ -376,20 +376,19 @@ impl<'a> PropertyTable<'a> {
     //  which is incomprehensible since the instruction by itself
     //  contains no reference to an object
     //  although in practice it's used along with `get prop_addr object property`
-    pub fn by_byteaddr(&self, byteaddr: u16) -> Property<'a> {
+    pub fn by_byteaddr(&self, byteaddr: usize) -> Option<Property<'a>> {
         let memory = self.mm.file();
-        let addr = byteaddr as usize;
-        let byte_neg1 = memory.get_byte(addr - 1);
+        let byte_neg1 = memory.read_byte(byteaddr - 1)?;
         let (id, data_len) = if (byte_neg1 & 0x80) != 0 {
             //two-byte header, and this is the second byte
-            let byte_neg2 = memory.get_byte(addr - 2);
+            let byte_neg2 = memory.read_byte(byteaddr - 2)?;
             parse_2byte_prop_header(byte_neg2, byte_neg1)
         } else {
             //one-byte header
             parse_1byte_prop_header(byte_neg1)
         };
-        let data = memory.get_subslice(addr, addr + data_len);
-        Property { id, data }
+        let data = memory.get_subslice(byteaddr, byteaddr + data_len);
+        Some(Property { id, data })
     }
 }
 
@@ -423,22 +422,22 @@ fn parse_2byte_prop_header(byte1: u8, byte2: u8) -> (u8, usize) {
     (id, data_len)
 }
 
-fn take_prop_header<'a>(table: &mut MemorySlice) -> (u8, usize) {
-    let byte1 = table.take_byte();
+fn take_prop_header<'a>(table: &mut MemorySlice) -> Option<(u8, usize)> {
+    let byte1 = table.take_byte()?;
     if (byte1 & 0x80) != 0 {
         // high bit set in either of first two bytes means two-byte header format
-        let byte2 = table.take_byte();
-        parse_2byte_prop_header(byte1, byte2)
+        let byte2 = table.take_byte()?;
+        Some(parse_2byte_prop_header(byte1, byte2))
     } else {
         // one-byte header format
-        parse_1byte_prop_header(byte1)
+        Some(parse_1byte_prop_header(byte1))
     }
 }
 
-fn take_property<'a>(table: &mut MemorySlice<'a>) -> Property<'a> {
-    let (id, data_len) = take_prop_header(table);
+fn take_property<'a>(table: &mut MemorySlice<'a>) -> Option<Property<'a>> {
+    let (id, data_len) = take_prop_header(table)?;
     let data = table.take_n_bytes(data_len);
-    Property { id, data }
+    Some(Property { id, data })
 }
 
 pub struct PropertyTableIterator<'a> {
@@ -450,7 +449,7 @@ impl<'a> Iterator for PropertyTableIterator<'a> {
     type Item = Property<'a>;
 
     fn next(&mut self) -> Option<Self::Item> {
-        let prop = take_property(&mut self.table);
+        let prop = take_property(&mut self.table)?;
         if (prop.id == 0) || (prop.id >= self.prev_id) {
             // id must be non-zero and strictly decreasing down the table
             // if we hit this case we've probably gone past the end of the table
