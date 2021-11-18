@@ -1,19 +1,22 @@
 use super::opcode;
 use super::*;
 
-use nom;
-use nom::bits::bits;
-use nom::bits::complete::tag as tag_bits;
-use nom::bits::complete::take as take_bits;
-use nom::branch::alt;
-use nom::bytes::complete::{tag, take};
-use nom::combinator::{map, not, verify};
-use nom::multi::count;
-use nom::number::complete::{be_i16, be_i8, be_u16, be_u8};
-use nom::sequence::preceded;
-use nom::IResult;
+use nom::{
+    bits::{
+        bits,
+        complete::{tag as tag_bits, take as take_bits},
+    },
+    branch::alt,
+    bytes::complete::{tag, take},
+    combinator::{cut, flat_map, map, peek, verify},
+    error::Error,
+    multi::count,
+    number::complete::{be_i16, be_i8, be_u8},
+    sequence::{preceded, tuple},
+    IResult,
+};
 
-// detail of nom implementation that we don't actually care about
+// detail of nom implementation
 type Bitstream<'a> = (&'a [u8], usize);
 
 pub fn decode_instr(input: &[u8]) -> IResult<&[u8], Instr> {
@@ -27,165 +30,214 @@ pub fn decode_instr(input: &[u8]) -> IResult<&[u8], Instr> {
 }
 
 fn operand_type_bits(input: Bitstream) -> IResult<Bitstream, OperandType> {
-    let (input, spec) = take_bits(2usize)(input)?;
-    let op_type = match spec {
+    map(take_bits(2usize), |s: u8| match s {
         0b00 => OperandType::LargeConst,
         0b01 => OperandType::SmallConst,
         0b10 => OperandType::Variable,
         0b11 => OperandType::Omitted,
         _ => panic!(),
-    };
-    Ok((input, op_type))
+    })(input)
 }
 
 // used in the "long" format
 fn operand_type_single_bit(input: Bitstream) -> IResult<Bitstream, OperandType> {
-    let (input, spec) = take_bits(1usize)(input)?;
-    let op_type = match spec {
+    map(take_bits(1usize), |s: u8| match s {
         0b0 => OperandType::SmallConst,
         0b1 => OperandType::Variable,
         _ => panic!(),
-    };
-    Ok((input, op_type))
+    })(input)
 }
 
-fn take_operand(input: &[u8], op_type: OperandType) -> IResult<&[u8], Option<Operand>> {
-    match op_type {
-        OperandType::LargeConst => map(be_i16, |n| Some(Operand::LargeConst(n)))(input),
-        OperandType::SmallConst => map(be_i8, |n| Some(Operand::SmallConst(n)))(input),
-        OperandType::Variable => map(be_u8, |v| Some(Operand::Variable(v)))(input),
+fn operand<'a>(
+    op_type: OperandType,
+) -> impl FnMut(&'a [u8]) -> IResult<&[u8], Option<Operand>, Error<&[u8]>> {
+    move |input: &'a [u8]| match op_type {
+        // cut because this happens after we've decoded the instruction itself
+        OperandType::LargeConst => cut(map(be_i16, |n| Some(Operand::LargeConst(n))))(input),
+        OperandType::SmallConst => cut(map(be_i8, |n| Some(Operand::SmallConst(n))))(input),
+        OperandType::Variable => cut(map(be_u8, |v| Some(Operand::Variable(v))))(input),
         OperandType::Omitted => Ok((input, None)),
     }
 }
 
-fn long_branch_data_bits(input: Bitstream) -> IResult<Bitstream, BranchData> {
-    // need to be explicit about types for this to compile
-    let t: (Bitstream, u8) = take_bits(1usize)(input)?;
-    let (input, invert_cond) = t;
-    let invert_cond = invert_cond == 0;
-
-    // "If bit 6 is clear, then the offset is a signed 14-bit number
-    // "given in bits 0 to 5 of the first byte followed by all 8 of the second.
-    let (input, _) = tag_bits(0b0, 1usize)(input)?;
-    let t: (Bitstream, i16) = take_bits(14usize)(input)?;
-    let (input, offset) = t;
-    // sign extend because nom doesn't do that for us...
-    let offset = (offset << 2) >> 2;
-    let dst = match offset {
-        0 => BranchDst::Return(false),
-        1 => BranchDst::Return(true),
-        _ => BranchDst::Offset(offset),
-    };
-    Ok((input, BranchData { invert_cond, dst }))
+fn long_branch_offset(input: Bitstream) -> IResult<Bitstream, i16> {
+    map(
+        // "If bit 6 is clear, then the offset is a signed 14-bit number
+        // "given in bits 0 to 5 of the first byte followed by all 8 of the second.
+        preceded(tag_bits(0b0, 1usize), take_bits(14usize)),
+        // sign extend because nom doesn't do that for us...
+        |offset: i16| (offset << 2) >> 2,
+    )(input)
 }
 
-fn short_branch_data_bits(input: Bitstream) -> IResult<Bitstream, BranchData> {
-    // need to be explicit about types for this to compile
-    let t: (Bitstream, u8) = take_bits(1usize)(input)?;
-    let (input, invert_cond) = t;
-    let invert_cond = if invert_cond == 0 { true } else { false };
+fn short_branch_offset(input: Bitstream) -> IResult<Bitstream, i16> {
+    map(
+        // "If bit 6 is set, then the branch occupies 1 byte only,
+        // "and the "offset" is in the range 0 to 63, given in the bottom 6 bits.
+        preceded(tag_bits(0b1, 1usize), take_bits(6usize)),
+        // not sure whether the offset is signed
+        // if it is this should take offset as i8 instead of u8
+        // and sign extend like we do with long branches
+        |offset: u8| offset as i16,
+    )(input)
+}
 
-    // "If bit 6 is set, then the branch occupies 1 byte only,
-    // "and the "offset" is in the range 0 to 63, given in the bottom 6 bits.
-    let (input, _) = tag_bits(0b1, 1usize)(input)?;
-    // spec implies offset is unsigned
-    // that might be wrong in which case we'd have to sign extend the offset
-    let (input, offset) = take_bits(6usize)(input)? as (Bitstream, i16);
-    let dst = match offset {
-        0 => BranchDst::Return(false),
-        1 => BranchDst::Return(true),
-        _ => BranchDst::Offset(offset),
-    };
-    Ok((input, BranchData { invert_cond, dst }))
+fn branch_dst(input: Bitstream) -> IResult<Bitstream, BranchDst> {
+    map(
+        alt((short_branch_offset, long_branch_offset)),
+        |offset| match offset {
+            0 => BranchDst::Return(false),
+            1 => BranchDst::Return(true),
+            _ => BranchDst::Offset(offset),
+        },
+    )(input)
+}
+
+fn branch_invert_cond(input: Bitstream) -> IResult<Bitstream, bool> {
+    // condition is inverted if the first bit is 0
+    map(take_bits(1usize), |b: u8| b == 0)(input)
 }
 
 fn branch_data(input: &[u8]) -> IResult<&[u8], BranchData> {
-    bits(alt((short_branch_data_bits, long_branch_data_bits)))(input)
+    map(
+        // cut because this happens after we've decoded the instruction itself
+        bits(cut(tuple((branch_invert_cond, branch_dst)))),
+        |(invert_cond, dst): (bool, BranchDst)| BranchData { invert_cond, dst },
+    )(input)
 }
 
-fn op_type_field(input: Bitstream, n_bytes: usize) -> IResult<Bitstream, Vec<OperandType>> {
-    let (input, mut op_types) = count(operand_type_bits, 4 * n_bytes)(input)?;
-    let n_ops = op_types
-        .iter()
-        .take_while(|&&op_type| op_type != OperandType::Omitted)
-        .count();
-    if op_types[n_ops..]
-        .iter()
-        .any(|&op_type| op_type != OperandType::Omitted)
-    {
-        // TODO: do this through nom's error handling
-        panic!("Invalidly formed operand specifier");
+fn dst_var(input: &[u8]) -> IResult<&[u8], u8> {
+    // cut because this happens after we've decoded the instruction itself
+    cut(be_u8)(input)
+}
+
+fn op_type_field_byte(input: &[u8]) -> IResult<&[u8], Vec<OperandType>> {
+    bits(count(operand_type_bits, 4))(input)
+}
+
+fn op_type_field_bytes<'a>(
+    n: usize,
+) -> impl FnMut(&'a [u8]) -> IResult<&'a [u8], Vec<OperandType>, Error<&[u8]>> {
+    map(
+        verify(
+            map(
+                count(op_type_field_byte, n),
+                |op_types: Vec<Vec<OperandType>>| {
+                    op_types.into_iter().flatten().collect::<Vec<_>>()
+                },
+            ),
+            |op_types: &Vec<OperandType>| {
+                op_types
+                    .iter()
+                    .skip_while(|&&op_type| op_type != OperandType::Omitted)
+                    .all(|&op_type| op_type == OperandType::Omitted)
+            },
+        ),
+        // only include the non-"Omitted" operand types
+        |op_types: Vec<OperandType>| {
+            op_types
+                .into_iter()
+                .take_while(|&op_type| op_type != OperandType::Omitted)
+                .collect::<Vec<_>>()
+        },
+    )
+}
+
+fn zero_op(input: &[u8]) -> IResult<&[u8], u8> {
+    bits::<_, _, nom::error::Error<(&[u8], usize)>, _, _>(preceded(
+        // 10 = short instruction format
+        // 11 = zero operands
+        tag_bits(0b1011, 4usize),
+        // 0xbe is first byte of extended instr
+        verify(take_bits(4usize), |&opcode| opcode != 0xe),
+    ))(input)
+}
+
+fn one_op(input: &[u8]) -> IResult<&[u8], (OperandType, u8)> {
+    bits(preceded(
+        tag_bits(0b10, 2usize),
+        tuple((
+            verify(operand_type_bits, |&op_type| {
+                op_type != OperandType::Omitted
+            }),
+            take_bits(4usize),
+        )),
+    ))(input)
+}
+
+fn long_two_op(input: &[u8]) -> IResult<&[u8], (OperandType, OperandType, u8)> {
+    bits(preceded(
+        tag_bits(0b0, 1usize),
+        tuple((
+            operand_type_single_bit,
+            operand_type_single_bit,
+            take_bits(5usize),
+        )),
+    ))(input)
+}
+
+fn var_two_op_opcode(input: &[u8]) -> IResult<&[u8], u8> {
+    // nom needs this horrible type annotation to compile
+    bits::<_, _, nom::error::Error<(&[u8], usize)>, _, _>(preceded(
+        tag_bits(0b110, 3usize),
+        take_bits(5usize),
+    ))(input)
+}
+
+fn var_two_op(input: &[u8]) -> IResult<&[u8], (OperandType, OperandType, u8)> {
+    map(
+        tuple((
+            var_two_op_opcode,
+            // TODO: JE can take more than two operands?
+            cut(verify(
+                op_type_field_bytes(1),
+                |op_types: &Vec<OperandType>| op_types.len() == 2,
+            )),
+        )),
+        |(opcode, op_types): (u8, Vec<OperandType>)| (op_types[0], op_types[1], opcode),
+    )(input)
+}
+
+fn n_op_type_bytes(opcode: u8) -> usize {
+    match opcode {
+        opcode::var_op::CALL_VS2 | opcode::var_op::CALL_VN2 => 2,
+        _ => 1,
     }
-    op_types.truncate(n_ops);
-    Ok((input, op_types))
 }
 
-fn zero_op_bits(input: Bitstream) -> IResult<Bitstream, u8> {
-    // 10 = short instruction format
-    // 11 = zero operands
-    let (input, _) = tag_bits(0b1011, 4usize)(input)?;
-    // 0xbe is first byte of extended instr
-    verify(take_bits(4usize), |&op| op != 0xe)(input)
+fn var_op_opcode(input: &[u8]) -> IResult<&[u8], u8> {
+    // nom needs this horrible type annotation to compile
+    bits::<_, _, nom::error::Error<(&[u8], usize)>, _, _>(preceded(
+        tag_bits(0b111, 3usize),
+        take_bits(5usize),
+    ))(input)
 }
 
-fn one_op_bits(input: Bitstream) -> IResult<Bitstream, (OperandType, u8)> {
-    // short instruction format
-    let (input, _) = tag_bits(0b10, 2usize)(input)?;
-    // if the op_type is omitted this is actually a zero_op instr
-    let (input, op_type) = verify(operand_type_bits, |&op_type| {
-        op_type != OperandType::Omitted
-    })(input)?;
-    let (input, opcode) = take_bits(4usize)(input)?;
-    Ok((input, (op_type, opcode)))
-}
-
-fn long_two_op_bits(input: Bitstream) -> IResult<Bitstream, (OperandType, OperandType, u8)> {
-    // long format marked by 0 as first bit
-    let (input, _) = tag_bits(0b0, 1usize)(input)?;
-    let (input, op1) = operand_type_single_bit(input)?;
-    let (input, op2) = operand_type_single_bit(input)?;
-    let (input, opcode) = take_bits(5usize)(input)?;
-    Ok((input, (op1, op2, opcode)))
-}
-
-fn var_two_op_bits(input: Bitstream) -> IResult<Bitstream, (OperandType, OperandType, u8)> {
-    // 11 means var format, 0 means two op instruction
-    let (input, _) = tag_bits(0b110, 3usize)(input)?;
-    let (input, opcode) = take_bits(5usize)(input)?;
-    let (input, op_types) = op_type_field(input, 1)?;
-    if op_types.len() != 2 {
-        // TODO: do through nom's error handling
-        // TODO: JE can take more than two operands?
-        panic!("two op instruction needs exactly two operands");
-    }
-    Ok((input, (op_types[0], op_types[1], opcode)))
-}
-
-fn var_op_bits(input: Bitstream) -> IResult<Bitstream, (Vec<OperandType>, u8)> {
-    // 11 means var format, 1 means var op instruction
-    let (input, _) = tag_bits(0b111, 3usize)(input)?;
-    let (input, opcode) = take_bits(5usize)(input)?;
-    // these two instructions (and only them) take up to 8 operands
-    // and so have two bytes instead of one specifying the types of those operands
-    let n_bytes_ops = if matches!(opcode, opcode::var_op::CALL_VS2 | opcode::var_op::CALL_VN2) {
-        2
-    } else {
-        1
-    };
-    let (input, op_types) = op_type_field(input, n_bytes_ops)?;
-    Ok((input, (op_types, opcode)))
+fn var_op(input: &[u8]) -> IResult<&[u8], (Vec<OperandType>, u8)> {
+    map(
+        tuple((
+            peek(var_op_opcode),
+            flat_map(
+                map(var_op_opcode, |opcode: u8| n_op_type_bytes(opcode)),
+                op_type_field_bytes,
+            ),
+        )),
+        |(opcode, op_types): (u8, Vec<OperandType>)| (op_types, opcode),
+    )(input)
 }
 
 fn extended(input: &[u8]) -> IResult<&[u8], (Vec<OperandType>, u8)> {
-    let (input, _) = tag([0xbe])(input)?;
-    let (input, opcode) = take(1usize)(input)?;
-    let opcode = opcode[0];
-    let (input, op_types) = bits(|input| op_type_field(input, 1))(input)?;
-    Ok((input, (op_types, opcode)))
+    map(
+        preceded(
+            tag([0xbe]),
+            cut(tuple((take(1usize), op_type_field_bytes(1)))),
+        ),
+        |(opcode, op_types): (&[u8], Vec<OperandType>)| (op_types, opcode[0]),
+    )(input)
 }
 
 fn zero_op_instr(input: &[u8]) -> IResult<&[u8], Instr> {
-    let (mut input, op) = bits(zero_op_bits)(input)?;
+    let (mut input, op) = zero_op(input)?;
     use opcode::zero_op::*;
     let instr = match op {
         0x10..=0xff => panic!("parser should emit a 4-bit opcode"),
@@ -203,7 +255,7 @@ fn zero_op_instr(input: &[u8]) -> IResult<&[u8], Instr> {
         RESTART => Instr::Restart,
         RET_POPPED => Instr::RetPopped,
         CATCH => {
-            let (new_input, dst) = be_u8(input)?;
+            let (new_input, dst) = dst_var(input)?;
             input = new_input;
             Instr::Catch { dst }
         }
@@ -226,8 +278,8 @@ fn zero_op_instr(input: &[u8]) -> IResult<&[u8], Instr> {
 }
 
 fn one_op_instr(input: &[u8]) -> IResult<&[u8], Instr> {
-    let (input, (op_type, opcode)) = bits(one_op_bits)(input)?;
-    let (input, operand) = take_operand(input, op_type)?;
+    let (input, (op_type, opcode)) = one_op(input)?;
+    let (input, operand) = cut(operand(op_type))(input)?;
     let operand = operand.unwrap();
     let mut input = input;
     use opcode::one_op::*;
@@ -240,7 +292,7 @@ fn one_op_instr(input: &[u8]) -> IResult<&[u8], Instr> {
         }
         GET_SIBLING => {
             let (new_input, bdata) = branch_data(input)?;
-            let (new_input, dst) = be_u8(new_input)?;
+            let (new_input, dst) = dst_var(new_input)?;
             input = new_input;
             Instr::GetSibling {
                 obj_id: operand,
@@ -250,7 +302,7 @@ fn one_op_instr(input: &[u8]) -> IResult<&[u8], Instr> {
         }
         GET_CHILD => {
             let (new_input, bdata) = branch_data(input)?;
-            let (new_input, dst) = be_u8(new_input)?;
+            let (new_input, dst) = dst_var(new_input)?;
             input = new_input;
             Instr::GetChild {
                 obj_id: operand,
@@ -259,7 +311,7 @@ fn one_op_instr(input: &[u8]) -> IResult<&[u8], Instr> {
             }
         }
         GET_PARENT => {
-            let (new_input, dst) = be_u8(input)?;
+            let (new_input, dst) = dst_var(input)?;
             input = new_input;
             Instr::GetParent {
                 obj_id: operand,
@@ -267,7 +319,7 @@ fn one_op_instr(input: &[u8]) -> IResult<&[u8], Instr> {
             }
         }
         GET_PROP_LEN => {
-            let (new_input, dst) = be_u8(input)?;
+            let (new_input, dst) = dst_var(input)?;
             input = new_input;
             Instr::GetPropLen {
                 prop_addr: operand,
@@ -284,7 +336,7 @@ fn one_op_instr(input: &[u8]) -> IResult<&[u8], Instr> {
             zstr_byteaddr: operand,
         },
         CALL_1S => {
-            let (new_input, dst) = be_u8(input)?;
+            let (new_input, dst) = dst_var(input)?;
             input = new_input;
             Instr::Call1S {
                 routine_paddr: operand,
@@ -300,7 +352,7 @@ fn one_op_instr(input: &[u8]) -> IResult<&[u8], Instr> {
             zstr_paddr: operand,
         },
         LOAD => {
-            let (new_input, dst) = be_u8(input)?;
+            let (new_input, dst) = dst_var(input)?;
             input = new_input;
             Instr::Load {
                 var_by_ref: operand,
@@ -315,11 +367,9 @@ fn one_op_instr(input: &[u8]) -> IResult<&[u8], Instr> {
 }
 
 fn two_op_instr(input: &[u8]) -> IResult<&[u8], Instr> {
-    // TODO: also account for var op format
-    let (input, (op_type1, op_type2, opcode)) =
-        bits(alt((long_two_op_bits, var_two_op_bits)))(input)?;
-    let (input, op1) = take_operand(input, op_type1)?;
-    let (input, op2) = take_operand(input, op_type2)?;
+    let (input, (op_type1, op_type2, opcode)) = alt((long_two_op, var_two_op))(input)?;
+    let (input, op1) = cut(operand(op_type1))(input)?;
+    let (input, op2) = cut(operand(op_type2))(input)?;
     let op1 = op1.unwrap();
     let op2 = op2.unwrap();
     let mut input = input;
@@ -394,7 +444,7 @@ fn two_op_instr(input: &[u8]) -> IResult<&[u8], Instr> {
             }
         }
         OR => {
-            let (new_input, dst) = be_u8(input)?;
+            let (new_input, dst) = dst_var(input)?;
             input = new_input;
             Instr::Or {
                 a: op1,
@@ -403,7 +453,7 @@ fn two_op_instr(input: &[u8]) -> IResult<&[u8], Instr> {
             }
         }
         AND => {
-            let (new_input, dst) = be_u8(input)?;
+            let (new_input, dst) = dst_var(input)?;
             input = new_input;
             Instr::And {
                 a: op1,
@@ -437,7 +487,7 @@ fn two_op_instr(input: &[u8]) -> IResult<&[u8], Instr> {
             dst_obj: op2,
         },
         LOADW => {
-            let (new_input, dst) = be_u8(input)?;
+            let (new_input, dst) = dst_var(input)?;
             input = new_input;
             Instr::LoadW {
                 array: op1,
@@ -446,7 +496,7 @@ fn two_op_instr(input: &[u8]) -> IResult<&[u8], Instr> {
             }
         }
         LOADB => {
-            let (new_input, dst) = be_u8(input)?;
+            let (new_input, dst) = dst_var(input)?;
             input = new_input;
             Instr::LoadB {
                 array: op1,
@@ -455,7 +505,7 @@ fn two_op_instr(input: &[u8]) -> IResult<&[u8], Instr> {
             }
         }
         GET_PROP => {
-            let (new_input, dst) = be_u8(input)?;
+            let (new_input, dst) = dst_var(input)?;
             input = new_input;
             Instr::GetProp {
                 obj_id: op1,
@@ -464,7 +514,7 @@ fn two_op_instr(input: &[u8]) -> IResult<&[u8], Instr> {
             }
         }
         GET_PROP_ADDR => {
-            let (new_input, dst) = be_u8(input)?;
+            let (new_input, dst) = dst_var(input)?;
             input = new_input;
             Instr::GetPropAddr {
                 obj_id: op1,
@@ -473,7 +523,7 @@ fn two_op_instr(input: &[u8]) -> IResult<&[u8], Instr> {
             }
         }
         GET_NEXT_PROP => {
-            let (new_input, dst) = be_u8(input)?;
+            let (new_input, dst) = dst_var(input)?;
             input = new_input;
             Instr::GetNextProp {
                 obj_id: op1,
@@ -482,7 +532,7 @@ fn two_op_instr(input: &[u8]) -> IResult<&[u8], Instr> {
             }
         }
         ADD => {
-            let (new_input, dst) = be_u8(input)?;
+            let (new_input, dst) = dst_var(input)?;
             input = new_input;
             Instr::Add {
                 a: op1,
@@ -491,7 +541,7 @@ fn two_op_instr(input: &[u8]) -> IResult<&[u8], Instr> {
             }
         }
         SUB => {
-            let (new_input, dst) = be_u8(input)?;
+            let (new_input, dst) = dst_var(input)?;
             input = new_input;
             Instr::Sub {
                 a: op1,
@@ -500,7 +550,7 @@ fn two_op_instr(input: &[u8]) -> IResult<&[u8], Instr> {
             }
         }
         MUL => {
-            let (new_input, dst) = be_u8(input)?;
+            let (new_input, dst) = dst_var(input)?;
             input = new_input;
             Instr::Mul {
                 a: op1,
@@ -509,7 +559,7 @@ fn two_op_instr(input: &[u8]) -> IResult<&[u8], Instr> {
             }
         }
         DIV => {
-            let (new_input, dst) = be_u8(input)?;
+            let (new_input, dst) = dst_var(input)?;
             input = new_input;
             Instr::Div {
                 a: op1,
@@ -518,7 +568,7 @@ fn two_op_instr(input: &[u8]) -> IResult<&[u8], Instr> {
             }
         }
         MOD => {
-            let (new_input, dst) = be_u8(input)?;
+            let (new_input, dst) = dst_var(input)?;
             input = new_input;
             Instr::Mod {
                 a: op1,
@@ -527,7 +577,7 @@ fn two_op_instr(input: &[u8]) -> IResult<&[u8], Instr> {
             }
         }
         CALL_2S => {
-            let (new_input, dst) = be_u8(input)?;
+            let (new_input, dst) = dst_var(input)?;
             input = new_input;
             Instr::Call2S {
                 routine_paddr: op1,
@@ -546,10 +596,10 @@ fn two_op_instr(input: &[u8]) -> IResult<&[u8], Instr> {
 }
 
 fn var_op_instr(input: &[u8]) -> IResult<&[u8], Instr> {
-    let (mut input, (op_types, opcode)) = bits(var_op_bits)(input)?;
+    let (mut input, (op_types, opcode)) = var_op(input)?;
     let mut operands: Vec<Operand> = Vec::new();
     for op_type in op_types {
-        let (new_input, op) = take_operand(input, op_type)?;
+        let (new_input, op) = cut(operand(op_type))(input)?;
         operands.push(op.unwrap());
         input = new_input;
     }
@@ -564,7 +614,7 @@ fn extended_instr(input: &[u8]) -> IResult<&[u8], Instr> {
     let (mut input, (op_types, opcode)) = extended(input)?;
     let mut operands: Vec<Operand> = Vec::new();
     for op_type in op_types {
-        let (new_input, op) = take_operand(input, op_type)?;
+        let (new_input, op) = cut(operand(op_type))(input)?;
         operands.push(op.unwrap());
         input = new_input;
     }

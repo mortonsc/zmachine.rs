@@ -317,9 +317,81 @@ pub enum Instr {
     EraseWindow {
         window: Operand,
     },
-    // more..
+    EraseLine {
+        value: Operand,
+    },
+    SetCursor {
+        line: Operand,
+        column: Operand,
+    },
+    GetCursor {
+        array: Operand,
+    },
+    SetTextStyle {
+        style: Operand,
+    },
+    BufferMode {
+        flag: Operand,
+    },
+    OutputStream {
+        number: Operand,
+        table: Operand,
+    },
+    InputStream {
+        number: Operand,
+    },
+    SoundEffect {
+        // TODO: some of these are actually optional
+        number: Operand,
+        effect: Operand,
+        volume: Operand,
+        routine: Operand,
+    },
+    ReadChar {
+        time: Operand,
+        routine: Operand,
+    },
+    ScanTable {
+        x: Operand,
+        table: Operand,
+        len: Operand,
+        form: Option<Operand>,
+        dst: u8,
+        bdata: BranchData,
+    },
+    Not {
+        value: Operand,
+        dst: u8,
+    },
+    // used for both call_vn and call_vn2
     CallVN {
         routine_paddr: Operand,
         args: Vec<Operand>,
+    },
+    Tokenize {
+        text: Operand,
+        parse: Operand,
+        dictionary: Operand,
+        flag: Operand,
+    },
+    EncodeText {
+        zscii_text: Operand,
+        length: Operand,
+        from: Operand,
+        coded_text: Operand,
+    },
+    CopyTable {
+        first: Operand,
+        second: Operand,
+        size: Operand,
+    },
+    PrintTable {
+        zscii_text: Operand,
+        width: Operand,
+        height: Option<Operand>,
+        skip: Option<Operand>,
+    },
+    CheckArgCount {
+        arg_num: Operand,
     },
 }
