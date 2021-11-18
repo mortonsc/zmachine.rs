@@ -230,8 +230,8 @@ impl<'a> ProgramState<'a> {
                 args,
             } => self
                 .call_routine(byteaddr, next_pc, ret_dst, args)
-                .map(|pc| Some(pc)),
-            CtrlFlow::Return { ret_val } => self.return_from_routine(ret_val).map(|pc| Some(pc)),
+                .map(Some),
+            CtrlFlow::Return { ret_val } => self.return_from_routine(ret_val).map(Some),
             CtrlFlow::Throw {
                 ret_val,
                 catch_frame,
@@ -243,7 +243,7 @@ impl<'a> ProgramState<'a> {
                     // truncate the call stack so that the requested stack frame is on top,
                     // then return like normal
                     self.call_stack.truncate(catch_frame + 1);
-                    self.return_from_routine(ret_val).map(|pc| Some(pc))
+                    self.return_from_routine(ret_val).map(Some)
                 }
             }
             CtrlFlow::Quit => Ok(None),

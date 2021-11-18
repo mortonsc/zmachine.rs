@@ -2,9 +2,9 @@ use super::*;
 
 use nom::{
     branch::alt,
-    bytes::complete::{tag, take},
+    bytes::complete::tag,
     character::complete::{char, multispace0, multispace1, one_of},
-    combinator::{all_consuming, map, map_res, opt, recognize, value},
+    combinator::{all_consuming, map, map_res, opt, recognize},
     error::ParseError,
     multi::{count, many0, many1, separated_list1},
     sequence::{delimited, preceded, terminated},
@@ -34,7 +34,7 @@ fn hexadecimal_value(input: &str) -> IResult<&str, i64> {
             alt((tag("0x"), tag("0X"))),
             recognize(many1(terminated(hex_digit, many0(char('_'))))),
         ),
-        |out: &str| i64::from_str_radix(&str::replace(&out, "_", ""), 16),
+        |out: &str| i64::from_str_radix(&str::replace(out, "_", ""), 16),
     )(input)
 }
 
@@ -42,7 +42,7 @@ fn hexadecimal_value(input: &str) -> IResult<&str, i64> {
 fn decimal_value(input: &str) -> IResult<&str, i64> {
     map_res(
         recognize(many1(terminated(one_of("0123456789"), many0(char('_'))))),
-        |out: &str| i64::from_str_radix(&str::replace(&out, "_", ""), 10),
+        |out: &str| str::replace(out, "_", "").parse::<i64>(),
     )(input)
 }
 
@@ -51,13 +51,14 @@ fn positive_constant(input: &str) -> IResult<&str, i64> {
 }
 
 fn negative_constant(input: &str) -> IResult<&str, i64> {
-    map(preceded(tag("-"), positive_constant), |out: i64| -1 * out)(input)
+    map(preceded(tag("-"), positive_constant), |out: i64| -out)(input)
 }
 
 fn constant_literal(input: &str) -> IResult<&str, NumericExpr> {
-    map(alt((positive_constant, negative_constant)), |c| {
-        NumericExpr::Literal(c)
-    })(input)
+    map(
+        alt((positive_constant, negative_constant)),
+        NumericExpr::Literal,
+    )(input)
 }
 
 fn indirect_addr_w(input: &str) -> IResult<&str, NumericExpr> {
@@ -110,14 +111,14 @@ fn single_byte_literal(input: &str) -> IResult<&str, u8> {
 fn bytes_literal(input: &str) -> IResult<&str, BytesExpr> {
     map(
         separated_list1(multispace1, single_byte_literal),
-        |v: Vec<u8>| BytesExpr::Literal(v),
+        BytesExpr::Literal,
     )(input)
 }
 
 fn bytes_indirect_addr(input: &str) -> IResult<&str, BytesExpr> {
     map(
         preceded(ws(tag("@")), ws(numeric_expr)),
-        |exp: NumericExpr| BytesExpr::IndirectAddr(exp),
+        BytesExpr::IndirectAddr,
     )(input)
 }
 
@@ -128,7 +129,7 @@ fn bytes_expr(input: &str) -> IResult<&str, BytesExpr> {
 fn echo(input: &str) -> IResult<&str, Command> {
     map(
         preceded(opt(terminated(tag("e"), multispace1)), numeric_expr),
-        |exp| Command::Echo(exp),
+        Command::Echo,
     )(input)
 }
 
@@ -138,7 +139,7 @@ fn decode(input: &str) -> IResult<&str, Command> {
             terminated(alt((tag("d"), tag("decode"))), multispace1),
             bytes_expr,
         ),
-        |exp| Command::Decode(exp),
+        Command::Decode,
     )(input)
 }
 
@@ -148,14 +149,14 @@ fn exec_instr(input: &str) -> IResult<&str, Command> {
             terminated(alt((tag("x"), tag("exec"))), multispace1),
             bytes_expr,
         ),
-        |exp| Command::ExecInstr(exp),
+        Command::ExecInstr,
     )(input)
 }
 
 fn print_zstr_instr(input: &str) -> IResult<&str, Command> {
     map(
         preceded(terminated(tag("pz"), multispace1), bytes_expr),
-        |exp| Command::PrintZStr(exp),
+        Command::PrintZStr,
     )(input)
 }
 

@@ -217,10 +217,7 @@ fn var_op(input: &[u8]) -> IResult<&[u8], (Vec<OperandType>, u8)> {
     map(
         tuple((
             peek(var_op_opcode),
-            flat_map(
-                map(var_op_opcode, |opcode: u8| n_op_type_bytes(opcode)),
-                op_type_field_bytes,
-            ),
+            flat_map(map(var_op_opcode, n_op_type_bytes), op_type_field_bytes),
         )),
         |(opcode, op_types): (u8, Vec<OperandType>)| (op_types, opcode),
     )(input)
@@ -648,7 +645,7 @@ mod tests {
     #[should_panic]
     fn test_extended_isnt_zero_op() {
         let extended: [u8; 1] = [0xbe];
-        let (_, instr) = zero_op_instr(&extended).unwrap();
+        let (_, _) = zero_op_instr(&extended).unwrap();
     }
 
     #[test]
