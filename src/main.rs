@@ -99,6 +99,7 @@ fn main() {
     let mut src = Vec::new();
     f.read_to_end(&mut src).unwrap();
     let mut zmach = ZMachine::from_src(&mut src);
-
-    instr::parse::test();
+    let ps = zmach.initial_program_state();
+    let mut debug = ps.debug_context();
+    debug.repl();
 }

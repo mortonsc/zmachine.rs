@@ -1,6 +1,7 @@
 #[macro_use]
 extern crate lazy_static;
 
+pub mod debug;
 pub mod instr;
 pub mod memory;
 pub mod text;
@@ -62,8 +63,7 @@ impl<'a> ZMachine<'a> {
         self.strings_offset = self.read_word(0x2a) as usize;
     }
 
-    pub fn routine_paddr_to_byteaddr(&self, paddr: u16) -> usize {
-        let paddr = paddr as usize;
+    pub fn routine_paddr_to_byteaddr(&self, paddr: usize) -> usize {
         match self.version {
             Version::V5 => 4 * paddr,
             Version::V7 => (4 * paddr) + (8 * self.routines_offset),
@@ -71,8 +71,7 @@ impl<'a> ZMachine<'a> {
         }
     }
 
-    pub fn string_paddr_to_byteaddr(&self, paddr: u16) -> usize {
-        let paddr = paddr as usize;
+    pub fn string_paddr_to_byteaddr(&self, paddr: usize) -> usize {
         match self.version {
             Version::V5 => 4 * paddr,
             Version::V7 => (4 * paddr) + (8 * self.strings_offset),
