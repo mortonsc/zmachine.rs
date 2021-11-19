@@ -16,6 +16,7 @@ pub enum Command {
     Decode(BytesExpr),
     ExecInstr(BytesExpr),
     PrintZStr(BytesExpr),
+    Run,
     Step,
     Quit,
 }
@@ -136,12 +137,13 @@ impl<'a> Context<'a> {
                 Some(0)
             }
             Command::Step => match self.zm.step() {
-                Ok(_) => Some(0),
-                Err(e) => {
-                    println!("Err: {:?}", e);
-                    Some(0)
-                }
+                Ok(_) => Some(self.zm.pc.unwrap_or(0) as i64),
+                Err(_) => Some(0),
             },
+            Command::Run => {
+                while self.zm.pc.is_some() && self.zm.step().is_ok() {}
+                Some(0)
+            }
             Command::Quit => Some(0),
         }
     }

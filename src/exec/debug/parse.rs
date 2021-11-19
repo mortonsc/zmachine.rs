@@ -164,6 +164,10 @@ fn step(input: &str) -> IResult<&str, Command> {
     map(alt((tag("s"), tag("step"))), |_| Command::Step)(input)
 }
 
+fn run(input: &str) -> IResult<&str, Command> {
+    map(alt((tag("r"), tag("run"))), |_| Command::Run)(input)
+}
+
 fn quit(input: &str) -> IResult<&str, Command> {
     map(alt((tag("quit"), tag("exit"), tag("q"))), |_| Command::Quit)(input)
 }
@@ -175,6 +179,7 @@ pub fn cmd(input: &str) -> IResult<&str, Command> {
         decode,
         exec_instr,
         print_zstr_instr,
+        run,
         step,
         quit,
     ))))(input)

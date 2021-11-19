@@ -385,6 +385,7 @@ pub enum Instr {
     },
     CheckArgCount {
         arg_num: Operand,
+        bdata: BranchData,
     },
 
     // extended opcodes

@@ -1,5 +1,6 @@
 use crate::text::ZStr;
 use std::cmp;
+use std::convert::TryInto;
 
 use super::memory::*;
 
@@ -190,10 +191,23 @@ impl<'a> Object<'a> {
         self.properties().short_name
     }
 
+    fn attr_location(attr: usize) -> (usize, u8) {
+        //" [attributes] are stored topmost bit first: e.g., attribute 0 is stored in bit 7 of the first byte,
+        //" attribute 31 is stored in bit 0 of the fourth.
+        let byte_num = attr / 8;
+        let bit_num = 7 - (attr % 8);
+        (byte_num, bit_num as u8)
+    }
+
     pub fn test_attr(self, attr: usize) -> bool {
-        let byte_num = 5 - (attr / 8);
-        let bit_num = attr % 8;
+        let (byte_num, bit_num) = Self::attr_location(attr);
         (self.data.read_byte(byte_num).unwrap() & (1 << bit_num)) != 0
+    }
+
+    pub fn set_attr(self, attr: usize) -> MemoryWrite {
+        let (byte_num, bit_num) = Self::attr_location(attr);
+        let current = self.data.read_byte(byte_num).unwrap();
+        self.data.write_byte(byte_num, current | (1 << bit_num))
     }
 
     #[inline]
@@ -281,6 +295,16 @@ impl<'a> Property<'a> {
     pub fn data(self) -> MemorySlice<'a> {
         self.data
     }
+
+    #[inline]
+    pub fn len(self) -> usize {
+        self.data.len()
+    }
+
+    #[inline]
+    pub fn byteaddr(self) -> u16 {
+        self.data.base_byteaddr().try_into().unwrap()
+    }
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -318,7 +342,7 @@ pub struct PropertyTable<'a> {
 
 impl<'a> PropertyTable<'a> {
     fn new(mm: &'a MemoryMap<'a>, byteaddr: usize) -> Option<Self> {
-        let mut table = mm.file().get_subslice_unbounded(byteaddr);
+        let mut table = mm.slice_from(byteaddr);
         let name_len_words = table.take_byte()?;
         let name_len_bytes = 2 * (name_len_words as usize);
         let short_name = table.take_n_bytes(name_len_bytes);
@@ -377,17 +401,16 @@ impl<'a> PropertyTable<'a> {
     //  contains no reference to an object
     //  although in practice it's used along with `get prop_addr object property`
     pub fn by_byteaddr(&self, byteaddr: usize) -> Option<Property<'a>> {
-        let memory = self.mm.file();
-        let byte_neg1 = memory.read_byte(byteaddr - 1)?;
+        let byte_neg1 = self.mm.read_byte(byteaddr - 1)?;
         let (id, data_len) = if (byte_neg1 & 0x80) != 0 {
             //two-byte header, and this is the second byte
-            let byte_neg2 = memory.read_byte(byteaddr - 2)?;
+            let byte_neg2 = self.mm.read_byte(byteaddr - 2)?;
             parse_2byte_prop_header(byte_neg2, byte_neg1)
         } else {
             //one-byte header
             parse_1byte_prop_header(byte_neg1)
         };
-        let data = memory.get_subslice(byteaddr, byteaddr + data_len);
+        let data = self.mm.file().get_subslice(byteaddr, byteaddr + data_len);
         Some(Property { id, data })
     }
 }

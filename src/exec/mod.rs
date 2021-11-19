@@ -2,7 +2,8 @@ use super::decode::parse::decode_instr;
 use super::decode::{BranchData, BranchDst, Instr, Operand};
 use super::memory::*;
 use super::text::ZStr;
-use log::debug;
+use log::{error, trace};
+use std::convert::TryFrom;
 
 mod debug;
 
@@ -18,6 +19,7 @@ pub struct StackFrame {
 #[derive(Debug, Clone, Copy)]
 pub enum ErrorKind {
     NotImplemented,
+    IllegalWrite(usize),
     DivByZero,
     ForbiddenInInterrupt,
     EmptyStack,
@@ -25,11 +27,12 @@ pub enum ErrorKind {
     InvalidVarRef(u16),
     InvalidLocal(u8),
     InvalidNumLocals(u8),
+    InvalidProperty(u16),
     InvalidStackFrame(usize),
     RoutineAddrOutOfBounds(usize),
     ByteAddrOutOfBounds(usize),
     BranchTargetOutOfBounds(i64),
-    IllegalWrite(usize),
+    GetPropOnLargeProperty,
     DecodingFailed, // TODO: pass some data along
     ExecutionFinished,
 }
@@ -210,7 +213,13 @@ impl<'a> ZMachine<'a> {
 
     pub fn step(&mut self) -> ExecResult<()> {
         let pc = self.pc.ok_or(ErrorKind::ExecutionFinished)?;
-        self.pc = self.step_at(pc)?;
+        self.pc = match self.step_at(pc) {
+            Ok(new_pc) => new_pc,
+            Err(e) => {
+                error!("(pc = {:#x}) {:?}", pc, e);
+                return Err(e);
+            }
+        };
         Ok(())
     }
 
@@ -220,10 +229,10 @@ impl<'a> ZMachine<'a> {
         let code = &self.mm.slice_from(pc);
         // TODO: preserve data about the encoding error
         let (instr, instr_len) = decode_instr(code).ok_or(ErrorKind::DecodingFailed)?;
-        debug!("{:?}", instr);
         let next_pc = pc + instr_len;
+        trace!("(pc = {:#x}) {:?}", pc, instr);
         let ctrl_flow = self.execute_instr(instr, next_pc)?;
-        debug!("{:?}", ctrl_flow);
+        trace!("{:?}", ctrl_flow);
         match ctrl_flow {
             CtrlFlow::Proceed => Ok(Some(next_pc)),
             CtrlFlow::ProceedFrom { next_pc } => Ok(Some(next_pc)),
@@ -394,7 +403,7 @@ impl<'a> ZMachine<'a> {
             Instr::RemoveObj { obj_id } => {
                 let obj_id = self.operand_as_value(obj_id)? as u16;
                 let writes = self.mm.objects().by_id(obj_id).remove_from_parent();
-                self.mm.apply_all(&writes[..]);
+                self.mm.apply_all(writes);
                 Ok(CtrlFlow::Proceed)
             }
             Instr::PrintObj { obj_id } => {
@@ -506,6 +515,13 @@ impl<'a> ZMachine<'a> {
                 let attr_set = self.mm.objects().by_id(obj_id).test_attr(attr);
                 Ok(CtrlFlow::branch(attr_set, bdata))
             }
+            Instr::SetAttr { obj_id, attr } => {
+                let obj_id = self.operand_as_value(obj_id)? as u16;
+                let attr = self.operand_as_value(attr)? as u16 as usize;
+                let write = self.mm.objects().by_id(obj_id).set_attr(attr);
+                self.mm.apply(write);
+                Ok(CtrlFlow::Proceed)
+            }
             Instr::Store { var_by_ref, val } => {
                 let var_by_ref = self.operand_as_var_by_ref(var_by_ref)?;
                 let val = self.operand_as_value(val)?;
@@ -545,6 +561,34 @@ impl<'a> ZMachine<'a> {
                 self.set_var_by_value(dst, val)?;
                 Ok(CtrlFlow::Proceed)
             }
+            Instr::GetProp { obj_id, prop, dst } => {
+                let obj_id = self.operand_as_value(obj_id)? as u16;
+                let prop = self.operand_as_value(prop)? as u16;
+                let obj = self.mm.objects().by_id(obj_id);
+                let prop = u8::try_from(prop).map_err(|_| ErrorKind::InvalidProperty(prop))?;
+                let prop_data = obj.properties().by_id_with_default(prop).data();
+                let val = match prop_data.len() {
+                    1 => prop_data.read_byte(0).map(i16::from),
+                    2 => prop_data.read_word(0).map(|w| w as i16),
+                    _ => return Err(ErrorKind::GetPropOnLargeProperty),
+                };
+                let val = val.ok_or(ErrorKind::ByteAddrOutOfBounds(prop_data.base_byteaddr()))?;
+                self.set_var_by_value(dst, val)?;
+                Ok(CtrlFlow::Proceed)
+            }
+            Instr::GetPropAddr { obj_id, prop, dst } => {
+                let obj_id = self.operand_as_value(obj_id)? as u16;
+                let prop = self.operand_as_value(prop)? as u16;
+                let prop = u8::try_from(prop).map_err(|_| ErrorKind::InvalidProperty(prop))?;
+                let obj = self.mm.objects().by_id(obj_id);
+                let prop_byteaddr = obj
+                    .properties()
+                    .by_id(prop)
+                    .map(|p| p.byteaddr())
+                    .unwrap_or(0);
+                self.set_var_by_value(dst, prop_byteaddr as i16)?;
+                Ok(CtrlFlow::Proceed)
+            }
             Instr::Call2S {
                 routine_paddr,
                 arg1,
@@ -579,6 +623,16 @@ impl<'a> ZMachine<'a> {
                     ret_val,
                     catch_frame,
                 })
+            }
+            Instr::Push { val } => {
+                let val = self.operand_as_value(val)?;
+                self.set_var_by_value(Self::SP, val)?;
+                Ok(CtrlFlow::Proceed)
+            }
+            Instr::CheckArgCount { arg_num, bdata } => {
+                let arg_num = self.operand_as_value(arg_num)? as u16 as usize;
+                let true_arg_num = self.stack_frame().n_args;
+                Ok(CtrlFlow::branch(arg_num <= true_arg_num, bdata))
             }
             _ => Err(ErrorKind::NotImplemented),
         }

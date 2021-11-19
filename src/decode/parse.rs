@@ -1,5 +1,6 @@
 use super::opcode;
 use super::*;
+use log::error;
 
 use nom::{
     bits::{
@@ -19,9 +20,19 @@ use nom::{
 // detail of nom implementation
 type Bitstream<'a> = (&'a [u8], usize);
 
+// being able to truncate the input makes error messages prettier
+// const MAX_INSTR_SIZE: usize = 30;
+
 //TODO: propagate parse errors
 pub fn decode_instr(input: &[u8]) -> Option<(Instr, usize)> {
-    let (remaining, instr) = one_instr(input).ok()?;
+    // let len = usize::min(input.len(), MAX_INSTR_SIZE);
+    let (remaining, instr) = match one_instr(input) {
+        Ok((remaining, instr)) => (remaining, instr),
+        Err(_) => {
+            error!("Decoding failed with err");
+            return None;
+        }
+    };
     let len = input.len() - remaining.len();
     Some((instr, len))
 }
@@ -30,6 +41,7 @@ fn one_instr(input: &[u8]) -> IResult<&[u8], Instr> {
     alt((
         zero_op_instr,
         one_op_instr,
+        two_op_var_je_instr,
         two_op_instr,
         var_op_instr,
         extended_instr,
@@ -195,10 +207,9 @@ fn var_two_op(input: &[u8]) -> IResult<&[u8], (OperandType, OperandType, u8)> {
     map(
         tuple((
             var_two_op_opcode,
-            // TODO: JE can take more than two operands?
             cut(verify(
                 op_type_field_bytes(1),
-                |op_types: &Vec<OperandType>| op_types.len() == 2,
+                |op_types: &Vec<OperandType>| op_types.len() >= 2,
             )),
         )),
         |(opcode, op_types): (u8, Vec<OperandType>)| (op_types[0], op_types[1], opcode),
@@ -238,6 +249,12 @@ fn extended(input: &[u8]) -> IResult<&[u8], (Vec<OperandType>, u8)> {
         ),
         |(opcode, op_types): (&[u8], Vec<OperandType>)| (op_types, opcode[0]),
     )(input)
+}
+
+// this is the only "two op" that can take more than two operands
+// so it gets a special case
+fn two_op_var_je(input: &[u8]) -> IResult<&[u8], Vec<OperandType>> {
+    preceded(tag([0xbe]), cut(op_type_field_bytes(1)))(input)
 }
 
 // silly way of generating errors
@@ -598,6 +615,26 @@ fn two_op_instr(input: &[u8]) -> IResult<&[u8], Instr> {
     Ok((input, instr))
 }
 
+fn two_op_var_je_instr(input: &[u8]) -> IResult<&[u8], Instr> {
+    let (mut input, op_types) = two_op_var_je(input)?;
+    let mut operands: Vec<Operand> = Vec::new();
+    for op_type in op_types {
+        let (new_input, op) = cut(operand(op_type))(input)?;
+        operands.push(op.unwrap());
+        input = new_input;
+    }
+    check(operands.len() >= 1)(input)?;
+    let (new_input, bdata) = branch_data(input)?;
+    input = new_input;
+    let a = operands.remove(0);
+    let instr = Instr::JE {
+        a,
+        others: operands,
+        bdata,
+    };
+    Ok((input, instr))
+}
+
 fn var_op_instr(input: &[u8]) -> IResult<&[u8], Instr> {
     let (mut input, (op_types, opcode)) = var_op(input)?;
     let mut operands: Vec<Operand> = Vec::new();
@@ -823,8 +860,11 @@ fn var_op_instr(input: &[u8]) -> IResult<&[u8], Instr> {
         }
         CHECK_ARG_COUNT => {
             check(n_ops == 1)(input)?;
+            let (new_input, bdata) = branch_data(input)?;
+            input = new_input;
             Instr::CheckArgCount {
                 arg_num: operands[0],
+                bdata,
             }
         }
     };

@@ -93,7 +93,7 @@ impl<'a> MemoryMap<'a> {
         self.memory[byteaddr + 1] = byte2;
     }
 
-    pub fn apply(&mut self, write: &MemoryWrite) {
+    pub fn apply(&mut self, write: MemoryWrite) {
         //TODO: enforce boundary between dynamic/static, protect read-only header data, etc
         let addr = write.byteaddr as usize;
         match write.data {
@@ -113,8 +113,8 @@ impl<'a> MemoryMap<'a> {
     }
 
     #[inline]
-    pub fn apply_all(&mut self, writes: &[MemoryWrite]) {
-        for write in writes {
+    pub fn apply_all<I: IntoIterator<Item = MemoryWrite>>(&mut self, writes: I) {
+        for write in writes.into_iter() {
             self.apply(write);
         }
     }
