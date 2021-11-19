@@ -1,8 +1,6 @@
 pub mod opcode;
 pub mod parse;
 
-pub const SP: u8 = 0x00;
-
 #[derive(Debug, Clone, Copy)]
 pub enum Operand {
     LargeConst(i16),
@@ -35,15 +33,9 @@ pub enum Instr {
     // zero op
     RTrue,
     RFalse,
-    Print {
-        ztext: Vec<u8>,
-    },
-    PrintRet {
-        ztext: Vec<u8>,
-    },
+    Print,
+    PrintRet,
     Nop,
-    Save,
-    Restore,
     Restart,
     RetPopped,
     Catch {
@@ -261,6 +253,7 @@ pub enum Instr {
     },
 
     // var ops
+    // CallVS includes call_vs and call_vs2
     CallVS {
         routine_paddr: Operand,
         args: Vec<Operand>,
@@ -284,8 +277,9 @@ pub enum Instr {
     ARead {
         text: Operand,
         parse: Operand,
-        time: Operand,
-        routine_paddr: Operand,
+        // either both or neither of these operands must be provided
+        time: Option<Operand>,
+        routine_paddr: Option<Operand>,
         dst: u8,
     },
     PrintChar {
@@ -310,15 +304,11 @@ pub enum Instr {
     SetWindow {
         window: Operand,
     },
-    CallVS2 {
-        routine_paddr: Operand,
-        args: Vec<Operand>,
-    },
     EraseWindow {
         window: Operand,
     },
     EraseLine {
-        value: Operand,
+        val: Operand,
     },
     SetCursor {
         line: Operand,
@@ -341,15 +331,17 @@ pub enum Instr {
         number: Operand,
     },
     SoundEffect {
-        // TODO: some of these are actually optional
-        number: Operand,
-        effect: Operand,
-        volume: Operand,
-        routine: Operand,
+        number: Option<Operand>,
+        effect: Option<Operand>,
+        volume: Option<Operand>,
+        routine: Option<Operand>,
     },
     ReadChar {
-        time: Operand,
-        routine: Operand,
+        always_one: Operand,
+        // both or neither of these must be provided
+        time: Option<Operand>,
+        routine: Option<Operand>,
+        dst: u8,
     },
     ScanTable {
         x: Operand,
@@ -360,7 +352,7 @@ pub enum Instr {
         bdata: BranchData,
     },
     Not {
-        value: Operand,
+        val: Operand,
         dst: u8,
     },
     // used for both call_vn and call_vn2
@@ -394,4 +386,52 @@ pub enum Instr {
     CheckArgCount {
         arg_num: Operand,
     },
+
+    // extended opcodes
+    Save {
+        table: Option<Operand>,
+        bytes: Option<Operand>,
+        name: Option<Operand>,
+        prompt: Option<Operand>,
+        dst: u8,
+    },
+    Restore {
+        table: Option<Operand>,
+        bytes: Option<Operand>,
+        name: Option<Operand>,
+        prompt: Option<Operand>,
+        dst: u8,
+    },
+    LogShift {
+        number: Operand,
+        places: Operand,
+        dst: u8,
+    },
+    ArtShift {
+        number: Operand,
+        places: Operand,
+        dst: u8,
+    },
+    SetFont {
+        font: Operand,
+        dst: u8,
+    },
+    SaveUndo {
+        dst: u8,
+    },
+    RestoreUndo {
+        dst: u8,
+    },
+    PrintUnicode {
+        char_num: Operand,
+    },
+    CheckUnicode {
+        char_num: Operand,
+        dst: u8,
+    },
+    SetTrueColor {
+        fg: Operand,
+        bg: Operand,
+    },
+    IllegalExtended(u8),
 }

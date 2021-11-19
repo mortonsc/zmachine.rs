@@ -684,7 +684,7 @@ mod tests {
 
     #[test]
     fn test_round_trip_custom_tables() {
-        let utt = UnicodeTransTable::from_memory(&utt_vec_from_str("åëø"));
+        let _utt = UnicodeTransTable::from_memory(&utt_vec_from_str("åëø"));
         // TODO
     }
 
@@ -810,8 +810,8 @@ mod tests {
         // test for off-by-one errors in the custom UTT code
         // construct a big UTT
         // starting point picked so that Zscii(251) translates to '~'
-        let mut chars = 30u8..;
-        let mut zeroes = iter::once(0u8).cycle();
+        let chars = 30u8..;
+        let zeroes = iter::once(0u8).cycle();
 
         // start by making it just a little too big
         let excessive_len = 1 + u8::try_from(UnicodeTransTable::MAX_SIZE).unwrap();

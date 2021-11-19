@@ -1,7 +1,8 @@
-use super::execution::ProgramState;
-use super::instr::parse::decode_instr;
-use super::memory::*;
-use super::text::ZStr;
+use super::ZMachine;
+use crate::decode::parse::decode_instr;
+use crate::decode::Instr;
+use crate::memory::*;
+use crate::text::ZStr;
 use std::convert::TryFrom;
 use std::io::{stdin, stdout, Write};
 
@@ -15,6 +16,7 @@ pub enum Command {
     Decode(BytesExpr),
     ExecInstr(BytesExpr),
     PrintZStr(BytesExpr),
+    Step,
     Quit,
 }
 
@@ -48,14 +50,14 @@ pub enum BytesExpr {
 
 pub struct Context<'a> {
     history: Vec<Option<i64>>,
-    ps: ProgramState<'a>,
+    zm: ZMachine<'a>,
 }
 
 impl<'a> Context<'a> {
-    pub fn new(ps: ProgramState<'a>) -> Self {
+    pub fn new(zm: ZMachine<'a>) -> Self {
         Self {
             history: Vec::new(),
-            ps,
+            zm,
         }
     }
 
@@ -100,30 +102,46 @@ impl<'a> Context<'a> {
         Some(false)
     }
 
+    fn decode(&self, exp: BytesExpr) -> Option<(Instr, usize)> {
+        let bytes = self.get_slice(&exp)?;
+        let (instr, instr_len) = decode_instr(bytes)?;
+        println!("{:?}", instr);
+        Some((instr, instr_len))
+    }
+
     pub fn do_cmd(&mut self, cmd: Command) -> Option<i64> {
         match cmd {
             Command::Echo(exp) => self.value_as_i64(&exp),
-            Command::Decode(exp) => {
-                let bytes = self.get_slice(&exp)?;
-                let (_, instr) = decode_instr(bytes).ok()?;
-                println!("{:?}", instr);
-                Some(0)
-            }
+            Command::Decode(exp) => self.decode(exp).map(|(_, instr_len)| instr_len as i64),
             Command::ExecInstr(exp) => {
-                let bytes = self.get_slice(&exp)?;
-                let (_, instr) = decode_instr(bytes).ok()?;
-                println!("{:?}", instr);
-                let ctrl_flow = self.ps.execute_instr(instr).ok()?;
-                println!("{:?}", ctrl_flow);
-                Some(0)
+                let (instr, _) = self.decode(exp)?;
+                // TODO: accurate pc for instructions read from memory
+                let result = self.zm.execute_instr(instr, 0);
+                match result {
+                    Ok(ctrl_flow) => {
+                        println!("{:?}", ctrl_flow);
+                        Some(1)
+                    }
+                    Err(e) => {
+                        println!("Err: {:?}", e);
+                        Some(0)
+                    }
+                }
             }
             Command::PrintZStr(exp) => {
                 let bytes = self.get_slice(&exp)?;
                 let zstr = ZStr::from(bytes);
-                let unicode: String = self.ps.mm.text_engine().zstr_to_unicode(zstr).collect();
+                let unicode: String = self.zm.mm.text_engine().zstr_to_unicode(zstr).collect();
                 println!("{}", unicode);
                 Some(0)
             }
+            Command::Step => match self.zm.step() {
+                Ok(_) => Some(0),
+                Err(e) => {
+                    println!("Err: {:?}", e);
+                    Some(0)
+                }
+            },
             Command::Quit => Some(0),
         }
     }
@@ -136,10 +154,10 @@ impl<'a> Context<'a> {
     fn value_as_i64_h(&self, exp: ShallowNumericExpr) -> Option<i64> {
         match exp {
             ShallowNumericExpr::Literal(val) => Some(val),
-            ShallowNumericExpr::IndirectAddrB(addr) => self.ps.mm.read_byte(addr).map(|n| n as i64),
-            ShallowNumericExpr::IndirectAddrW(addr) => self.ps.mm.read_word(addr).map(|n| n as i64),
+            ShallowNumericExpr::IndirectAddrB(addr) => self.zm.mm.read_byte(addr).map(|n| n as i64),
+            ShallowNumericExpr::IndirectAddrW(addr) => self.zm.mm.read_word(addr).map(|n| n as i64),
             ShallowNumericExpr::VarAccess(var) => {
-                self.ps.get_var_by_ref(var).ok().map(|v| v as i64)
+                self.zm.get_var_by_ref(var).ok().map(|v| v as i64)
             }
             ShallowNumericExpr::History(idx) => *self.history.get(idx - 1)?,
             ShallowNumericExpr::MostRecent => *self.history.last()?,
@@ -160,10 +178,10 @@ impl<'a> Context<'a> {
         match exp {
             // special cases to treat these values as unsigned
             ShallowNumericExpr::IndirectAddrW(addr) => {
-                self.ps.mm.read_word(addr).map(|n| n as u16 as usize)
+                self.zm.mm.read_word(addr).map(|n| n as u16 as usize)
             }
             ShallowNumericExpr::VarAccess(var) => {
-                let val = self.ps.get_var_by_ref(var).ok()?;
+                let val = self.zm.get_var_by_ref(var).ok()?;
                 Some(val as u16 as usize)
             }
             _ => usize::try_from(self.value_as_i64_h(exp)?).ok(),
@@ -195,17 +213,17 @@ impl<'a> Context<'a> {
             BytesExpr::Literal(bytes) => Some(&bytes[..]),
             BytesExpr::IndirectAddr(addr_expr) => {
                 let byteaddr = self.value_as_byteaddr(addr_expr)?;
-                Some(&self.ps.mm.contents()[byteaddr..])
+                Some(&self.zm.mm.contents()[byteaddr..])
             }
             BytesExpr::IndirectPAddrR(addr_expr) => {
                 let paddr = self.value_as_byteaddr(addr_expr)?;
-                let byteaddr = self.ps.mm.routine_paddr_to_byteaddr(paddr);
-                Some(&self.ps.mm.contents()[byteaddr..])
+                let byteaddr = self.zm.mm.routine_paddr_to_byteaddr(paddr);
+                Some(&self.zm.mm.contents()[byteaddr..])
             }
             BytesExpr::IndirectPAddrS(addr_expr) => {
                 let paddr = self.value_as_byteaddr(addr_expr)?;
-                let byteaddr = self.ps.mm.string_paddr_to_byteaddr(paddr);
-                Some(&self.ps.mm.contents()[byteaddr..])
+                let byteaddr = self.zm.mm.string_paddr_to_byteaddr(paddr);
+                Some(&self.zm.mm.contents()[byteaddr..])
             }
         }
     }

@@ -160,11 +160,22 @@ fn print_zstr_instr(input: &str) -> IResult<&str, Command> {
     )(input)
 }
 
+fn step(input: &str) -> IResult<&str, Command> {
+    map(alt((tag("s"), tag("step"))), |_| Command::Step)(input)
+}
+
 fn quit(input: &str) -> IResult<&str, Command> {
     map(alt((tag("quit"), tag("exit"), tag("q"))), |_| Command::Quit)(input)
 }
 
 // TODO: maybe don't want this to necessarily be all consuming
 pub fn cmd(input: &str) -> IResult<&str, Command> {
-    all_consuming(ws(alt((echo, decode, exec_instr, print_zstr_instr, quit))))(input)
+    all_consuming(ws(alt((
+        echo,
+        decode,
+        exec_instr,
+        print_zstr_instr,
+        step,
+        quit,
+    ))))(input)
 }

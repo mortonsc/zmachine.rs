@@ -13,6 +13,7 @@ pub enum Version {
 pub struct MemoryMap<'a> {
     memory: &'a mut [u8],
     version: Version,
+    static_mem_base_byteaddr: usize,
     global_vars_byteaddr: usize,
     routines_offset: usize,
     strings_offset: usize,
@@ -24,7 +25,7 @@ impl<'a> MemoryAccess for MemoryMap<'a> {
         0
     }
     #[inline]
-    fn contents<'b>(&'b self) -> &'b [u8] {
+    fn contents(&self) -> &[u8] {
         self.memory
     }
 }
@@ -34,6 +35,7 @@ impl<'a> MemoryMap<'a> {
         let mm = MemoryMap {
             memory: src,
             version: Version::V5,
+            static_mem_base_byteaddr: 0,
             global_vars_byteaddr: 0,
             routines_offset: 0,
             strings_offset: 0,
@@ -42,7 +44,7 @@ impl<'a> MemoryMap<'a> {
     }
 
     fn initialize(mut self) -> Option<Self> {
-        let version = self.read_byte(0x00)?;
+        let version = self.read_byte(header::VERSION_NUM_B)?;
         self.version = match version {
             1 | 2 | 3 | 4 | 6 => panic!("Version not supported: {}", version),
             5 => Version::V5,
@@ -50,9 +52,10 @@ impl<'a> MemoryMap<'a> {
             8 => Version::V8,
             _ => panic!("Version not recognized: {}", version),
         };
-        self.global_vars_byteaddr = self.read_word(0x0c)? as usize;
-        self.routines_offset = self.read_word(0x28)? as usize;
-        self.strings_offset = self.read_word(0x2a)? as usize;
+        self.static_mem_base_byteaddr = self.read_word(header::STATIC_MEM_BASE_BYTEADDR)? as usize;
+        self.global_vars_byteaddr = self.read_word(header::GLOBAL_VAR_TABLE_BYTEADDR)? as usize;
+        self.routines_offset = self.read_word(header::ROUTINES_OFFSET_W)? as usize;
+        self.strings_offset = self.read_word(header::STRING_OFFSET_W)? as usize;
         Some(self)
     }
 
@@ -103,7 +106,7 @@ impl<'a> MemoryMap<'a> {
             }
             WriteData::WordRange(ref words) => {
                 for (offset, word) in words.iter().enumerate() {
-                    self.write_word(addr + (2 * offset), *word);
+                    self.apply_write_word(addr + (2 * offset), *word);
                 }
             }
         }
@@ -118,7 +121,7 @@ impl<'a> MemoryMap<'a> {
 
     // returns a MemorySlice containing the entirety of memory
     #[inline]
-    pub fn file<'b>(&'b self) -> MemorySlice<'b> {
+    pub fn file(&self) -> MemorySlice {
         MemorySlice {
             base_addr: 0,
             contents: self.memory,
@@ -135,22 +138,22 @@ impl<'a> MemoryMap<'a> {
         }
     }
     #[inline]
-    pub fn objects<'b>(&'b self) -> ObjectTable<'b> {
+    pub fn objects(&self) -> ObjectTable {
         // object table is located immediately after the default prop table in memory
         let byteaddr = self.read_word(0xa).unwrap() + (DefaultPropertyTable::SIZE as u16);
-        ObjectTable::new(&self, byteaddr)
+        ObjectTable::new(self, byteaddr)
     }
     #[inline]
-    pub fn dictionary<'b>(&'b self) -> Dictionary<'b> {
+    pub fn dictionary(&self) -> Dictionary {
         let byteaddr = self.read_word(0x08).unwrap();
-        Dictionary::new(&self, byteaddr)
+        Dictionary::new(self, byteaddr)
     }
     #[inline]
-    pub fn default_properties<'b>(&'b self) -> DefaultPropertyTable<'b> {
+    pub fn default_properties<'b>(&self) -> DefaultPropertyTable {
         let byteaddr = self.read_word(0xa).unwrap();
-        DefaultPropertyTable::new(&self, byteaddr)
+        DefaultPropertyTable::new(self, byteaddr)
     }
-    pub fn alph_table<'b>(&'b self) -> AlphTable<'b> {
+    pub fn alph_table(&self) -> AlphTable {
         let byteaddr = self.read_word(0x34).unwrap() as usize;
         if byteaddr == 0 {
             AlphTable::Default
@@ -159,12 +162,12 @@ impl<'a> MemoryMap<'a> {
             AlphTable::from_memory(&self.memory[byteaddr..]).unwrap_or(AlphTable::Default)
         }
     }
-    pub fn abbr_table<'b>(&'b self) -> AbbrTable<'b> {
+    pub fn abbr_table(&self) -> AbbrTable {
         let byteaddr = self.read_word(0x18).unwrap() as usize;
         //TODO: handle errors
         AbbrTable::from_memory(self.memory, byteaddr).unwrap()
     }
-    pub fn unicode_trans_table<'b>(&'b self) -> UnicodeTransTable<'b> {
+    pub fn unicode_trans_table(&self) -> UnicodeTransTable {
         let byteaddr = self.header_extension_word(3);
         match byteaddr {
             None | Some(0) => UnicodeTransTable::Default,
@@ -173,7 +176,7 @@ impl<'a> MemoryMap<'a> {
                 .unwrap_or(UnicodeTransTable::Default),
         }
     }
-    pub fn text_engine<'b>(&'b self) -> TextEngine<'b> {
+    pub fn text_engine(&self) -> TextEngine {
         // TODO: cache some of this stuff if it's in static memory
         TextEngine::new(
             self.alph_table(),

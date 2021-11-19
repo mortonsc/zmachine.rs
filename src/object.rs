@@ -422,7 +422,7 @@ fn parse_2byte_prop_header(byte1: u8, byte2: u8) -> (u8, usize) {
     (id, data_len)
 }
 
-fn take_prop_header<'a>(table: &mut MemorySlice) -> Option<(u8, usize)> {
+fn take_prop_header(table: &mut MemorySlice) -> Option<(u8, usize)> {
     let byte1 = table.take_byte()?;
     if (byte1 & 0x80) != 0 {
         // high bit set in either of first two bytes means two-byte header format

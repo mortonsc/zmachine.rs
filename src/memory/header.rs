@@ -1,0 +1,40 @@
+pub const LEN_BYTES: usize = 38;
+pub const VERSION_NUM_B: usize = 0x00;
+pub const FLAGS_1_B: usize = 0x01;
+pub const RELEASE_NUM_W: usize = 0x02;
+pub const HIGH_MEM_BASE_BYTEADDR: usize = 0x04;
+pub const INITIAL_PC_BYTEADDR: usize = 0x06;
+pub const DICT_BYTEADDR: usize = 0x08;
+pub const OBJECT_TABLE_BYTEADDR: usize = 0x0a;
+pub const GLOBAL_VAR_TABLE_BYTEADDR: usize = 0x0c;
+pub const STATIC_MEM_BASE_BYTEADDR: usize = 0x0e;
+pub const FLAGS_2_B: usize = 0x10;
+pub const ABBR_TABLE_BYTEADDR: usize = 0x18;
+pub const FILE_LEN_W: usize = 0x1a;
+pub const FILE_CHECKSUM_W: usize = 0x1c;
+pub const INTERPRETER_NUM_B: usize = 0x1e;
+pub const INTERPRETER_VERSION_B: usize = 0x1f;
+pub const SCREEN_HEIGHT_LINES_B: usize = 0x20;
+pub const SCREEN_WIDTH_CHARS_B: usize = 0x21;
+pub const SCREEN_WIDTH_UNITS_W: usize = 0x22;
+pub const SCREEN_HEIGHT_UNITS_W: usize = 0x24;
+pub const FONT_WIDTH_UNITS_B: usize = 0x26;
+pub const FONT_HEIGHT_UNITS_B: usize = 0x27;
+pub const ROUTINES_OFFSET_W: usize = 0x28;
+pub const STRING_OFFSET_W: usize = 0x2a;
+pub const DEFAULT_BG_COLOR_B: usize = 0x2c;
+pub const DEFAULT_FG_COLOR_B: usize = 0x2d;
+pub const TERMINATING_CHARS_TABLE_BYTEADDR: usize = 0x2e;
+pub const STANDARD_REVISION_NUM_W: usize = 0x32;
+pub const ALPH_TABLE_BYTEADDR: usize = 0x34;
+pub const EXTENSION_BYTEADDR: usize = 0x36;
+
+pub mod extension {
+    pub const LEN_WORDS_W: usize = 0x00;
+    pub const CLICK_X_COORD_W: usize = 0x01;
+    pub const CLICK_Y_COORD_W: usize = 0x02;
+    pub const UNICODE_TRANS_TABLE_BYTEADDR: usize = 0x03;
+    pub const FLAGS_3_W: usize = 0x04;
+    pub const TRUE_DEFAULT_FG_COLOR_W: usize = 0x05;
+    pub const TRUE_DEFAULT_BG_COLOR_W: usize = 0x06;
+}

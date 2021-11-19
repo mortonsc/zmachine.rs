@@ -1,8 +1,10 @@
-use super::debug;
-use super::instr::parse::decode_instr;
-use super::instr::{BranchData, BranchDst, Instr, Operand, SP};
+use super::decode::parse::decode_instr;
+use super::decode::{BranchData, BranchDst, Instr, Operand};
 use super::memory::*;
 use super::text::ZStr;
+use log::debug;
+
+mod debug;
 
 #[derive(Debug)]
 pub struct StackFrame {
@@ -26,16 +28,20 @@ pub enum ErrorKind {
     InvalidStackFrame(usize),
     RoutineAddrOutOfBounds(usize),
     ByteAddrOutOfBounds(usize),
+    BranchTargetOutOfBounds(i64),
     IllegalWrite(usize),
     DecodingFailed, // TODO: pass some data along
     ExecutionFinished,
 }
 
-pub type ExeResult<T> = Result<T, ErrorKind>;
+pub type ExecResult<T> = Result<T, ErrorKind>;
 
 #[derive(Debug, Clone)]
 pub enum CtrlFlow {
     Proceed,
+    ProceedFrom {
+        next_pc: usize,
+    },
     Jump {
         offset: i16,
     },
@@ -68,14 +74,15 @@ impl CtrlFlow {
     }
 }
 
-pub struct ProgramState<'a> {
+pub struct ZMachine<'a> {
     pub mm: &'a mut MemoryMap<'a>,
     pub pc: Option<usize>,
     pub call_stack: Vec<StackFrame>,
 }
 
-impl<'a> ProgramState<'a> {
+impl<'a> ZMachine<'a> {
     pub const MAX_N_LOCALS: u8 = 15;
+    pub const SP: u8 = 0x00;
 
     pub fn new(mm: &'a mut MemoryMap<'a>) -> Self {
         let initial_frame = StackFrame {
@@ -86,7 +93,7 @@ impl<'a> ProgramState<'a> {
             data_stack: Vec::new(),
         };
         let pc = mm.read_word(0x06).unwrap() as usize;
-        ProgramState {
+        ZMachine {
             mm,
             pc: Some(pc),
             call_stack: vec![initial_frame],
@@ -107,7 +114,7 @@ impl<'a> ProgramState<'a> {
     }
 
     // mutable because variable 0x00 pops the stack
-    fn operand_as_value(&mut self, op: Operand) -> ExeResult<i16> {
+    fn operand_as_value(&mut self, op: Operand) -> ExecResult<i16> {
         match op {
             Operand::LargeConst(val) => Ok(val),
             Operand::SmallConst(val) => Ok(val as i16),
@@ -115,7 +122,7 @@ impl<'a> ProgramState<'a> {
         }
     }
 
-    fn operand_as_var_by_ref(&mut self, op: Operand) -> ExeResult<u8> {
+    fn operand_as_var_by_ref(&mut self, op: Operand) -> ExecResult<u8> {
         let var_by_ref = self.operand_as_value(op)? as u16;
         if var_by_ref > (u8::MAX as u16) {
             Err(ErrorKind::InvalidVarRef(var_by_ref))
@@ -124,23 +131,23 @@ impl<'a> ProgramState<'a> {
         }
     }
 
-    fn operand_as_byteaddr(&mut self, op: Operand) -> ExeResult<usize> {
+    fn operand_as_byteaddr(&mut self, op: Operand) -> ExecResult<usize> {
         self.operand_as_value(op).map(|op| op as u16 as usize)
     }
 
-    fn operand_as_routine_paddr(&mut self, op: Operand) -> ExeResult<usize> {
+    fn operand_as_routine_paddr(&mut self, op: Operand) -> ExecResult<usize> {
         self.operand_as_value(op)
             .map(|op| self.mm.routine_paddr_to_byteaddr(op as u16 as usize))
     }
 
-    fn operand_as_string_paddr(&mut self, op: Operand) -> ExeResult<usize> {
+    fn operand_as_string_paddr(&mut self, op: Operand) -> ExecResult<usize> {
         self.operand_as_value(op)
             .map(|op| self.mm.string_paddr_to_byteaddr(op as u16 as usize))
     }
 
     // mutable because variable 0x00 pops the stack
-    fn get_var_by_value(&mut self, var: u8) -> ExeResult<i16> {
-        if var == SP {
+    fn get_var_by_value(&mut self, var: u8) -> ExecResult<i16> {
+        if var == Self::SP {
             self.stack_frame_mut()
                 .data_stack
                 .pop()
@@ -150,8 +157,8 @@ impl<'a> ProgramState<'a> {
         }
     }
 
-    fn set_var_by_value(&mut self, var: u8, val: i16) -> ExeResult<()> {
-        if var == SP {
+    fn set_var_by_value(&mut self, var: u8, val: i16) -> ExecResult<()> {
+        if var == Self::SP {
             self.stack_frame_mut().data_stack.push(val);
             Ok(())
         } else {
@@ -159,7 +166,7 @@ impl<'a> ProgramState<'a> {
         }
     }
 
-    pub fn get_var_by_ref(&self, var: u8) -> ExeResult<i16> {
+    pub fn get_var_by_ref(&self, var: u8) -> ExecResult<i16> {
         match var {
             0x00 => self
                 .stack_frame()
@@ -177,7 +184,7 @@ impl<'a> ProgramState<'a> {
         }
     }
 
-    fn set_var_by_ref(&mut self, var: u8, val: i16) -> ExeResult<()> {
+    fn set_var_by_ref(&mut self, var: u8, val: i16) -> ExecResult<()> {
         match var {
             0x00 => {
                 *self
@@ -201,7 +208,7 @@ impl<'a> ProgramState<'a> {
         Ok(())
     }
 
-    pub fn step(&mut self) -> ExeResult<()> {
+    pub fn step(&mut self) -> ExecResult<()> {
         let pc = self.pc.ok_or(ErrorKind::ExecutionFinished)?;
         self.pc = self.step_at(pc)?;
         Ok(())
@@ -209,19 +216,21 @@ impl<'a> ProgramState<'a> {
 
     // returns the pc of the next instruction to execute
     // or None if this instruction was a quit
-    pub fn step_at(&mut self, pc: usize) -> ExeResult<Option<usize>> {
-        let code = &self.mm.contents()[pc..];
+    pub fn step_at(&mut self, pc: usize) -> ExecResult<Option<usize>> {
+        let code = &self.mm.slice_from(pc);
         // TODO: preserve data about the encoding error
-        let (new_code, instr) = decode_instr(code).map_err(|_| ErrorKind::DecodingFailed)?;
-        let instr_len = code.len() - new_code.len();
+        let (instr, instr_len) = decode_instr(code).ok_or(ErrorKind::DecodingFailed)?;
+        debug!("{:?}", instr);
         let next_pc = pc + instr_len;
-        let ctrl_flow = self.execute_instr(instr)?;
+        let ctrl_flow = self.execute_instr(instr, next_pc)?;
+        debug!("{:?}", ctrl_flow);
         match ctrl_flow {
             CtrlFlow::Proceed => Ok(Some(next_pc)),
+            CtrlFlow::ProceedFrom { next_pc } => Ok(Some(next_pc)),
             CtrlFlow::Jump { offset } => {
                 let target = (next_pc as i64) + (offset as i64) - 2;
                 if target < 0 {
-                    panic!("out of bounds branch");
+                    return Err(ErrorKind::BranchTargetOutOfBounds(target));
                 }
                 Ok(Some(target as usize))
             }
@@ -257,7 +266,7 @@ impl<'a> ProgramState<'a> {
         ret_addr: usize,
         ret_dst: Option<u8>,
         args: Vec<i16>,
-    ) -> ExeResult<usize> {
+    ) -> ExecResult<usize> {
         let mut new_frame = StackFrame {
             ret_addr,
             ret_dst,
@@ -278,7 +287,7 @@ impl<'a> ProgramState<'a> {
         Ok(byteaddr + 1)
     }
 
-    fn return_from_routine(&mut self, ret_val: i16) -> ExeResult<usize> {
+    fn return_from_routine(&mut self, ret_val: i16) -> ExecResult<usize> {
         if self.call_stack.len() == 1 {
             return Err(ErrorKind::IllegalReturn);
         }
@@ -306,22 +315,26 @@ impl<'a> ProgramState<'a> {
         println!();
     }
 
-    pub fn execute_instr(&mut self, instr: Instr) -> ExeResult<CtrlFlow> {
+    pub fn execute_instr(&mut self, instr: Instr, pc: usize) -> ExecResult<CtrlFlow> {
         match instr {
             Instr::RTrue => Ok(CtrlFlow::Return { ret_val: 1 }),
             Instr::RFalse => Ok(CtrlFlow::Return { ret_val: 0 }),
-            Instr::Print { ztext } => {
-                self.print_zstr(ZStr::from(&ztext[..]));
-                Ok(CtrlFlow::Proceed)
+            // TODO: need to be able to read the ZStr from the code
+            Instr::Print => {
+                let zstr = ZStr::from(self.mm.slice_from(pc));
+                self.print_zstr(zstr);
+                let next_pc = pc + zstr.len_bytes();
+                Ok(CtrlFlow::ProceedFrom { next_pc })
             }
-            Instr::PrintRet { ztext } => {
-                self.print_zstr(ZStr::from(&ztext[..]));
+            Instr::PrintRet => {
+                let zstr = ZStr::from(self.mm.slice_from(pc));
+                self.print_zstr(zstr);
                 self.print_newline();
                 Ok(CtrlFlow::Return { ret_val: 1 })
             }
             Instr::Nop => Ok(CtrlFlow::Proceed),
             Instr::RetPopped => {
-                let ret_val = self.get_var_by_value(SP)?;
+                let ret_val = self.get_var_by_value(Self::SP)?;
                 Ok(CtrlFlow::Return { ret_val })
             }
             Instr::Catch { dst } => {
@@ -552,7 +565,7 @@ impl<'a> ProgramState<'a> {
             } => self.routine_call_op(routine_paddr, None, args),
             Instr::Pull { var_by_ref } => {
                 let var_by_ref = self.operand_as_var_by_ref(var_by_ref)?;
-                let val = self.get_var_by_value(SP)?;
+                let val = self.get_var_by_value(Self::SP)?;
                 self.set_var_by_ref(var_by_ref, val)?;
                 Ok(CtrlFlow::Proceed)
             }
@@ -576,7 +589,7 @@ impl<'a> ProgramState<'a> {
         paddr: Operand,
         ret_dst: Option<u8>,
         args: Vec<Operand>,
-    ) -> ExeResult<CtrlFlow> {
+    ) -> ExecResult<CtrlFlow> {
         let byteaddr = self.operand_as_routine_paddr(paddr)?;
         let mut arg_vals: Vec<i16> = Vec::new();
         for arg in args {
@@ -595,7 +608,7 @@ impl<'a> ProgramState<'a> {
         b: Operand,
         dst: u8,
         f: impl Fn(i16, i16) -> i16,
-    ) -> ExeResult<CtrlFlow> {
+    ) -> ExecResult<CtrlFlow> {
         let a = self.operand_as_value(a)?;
         let b = self.operand_as_value(b)?;
         self.set_var_by_value(dst, f(a, b))?;

@@ -2,13 +2,14 @@ use super::*;
 use crate::text::ZStr;
 use std::ops::Deref;
 
+pub mod header;
 mod map;
 
 pub use map::MemoryMap;
 
 pub trait MemoryAccess {
     fn base_byteaddr(&self) -> usize;
-    fn contents<'b>(&'b self) -> &'b [u8];
+    fn contents(&self) -> &[u8];
 
     #[inline]
     fn len(&self) -> usize {
@@ -47,6 +48,13 @@ pub trait MemoryAccess {
             data: WriteData::Word(val),
         }
     }
+
+    fn slice_from(&self, index: usize) -> MemorySlice {
+        MemorySlice {
+            base_addr: self.base_byteaddr() + index,
+            contents: &self.contents()[index..],
+        }
+    }
 }
 
 // wrapper around slices of program memory
@@ -63,7 +71,7 @@ impl<'a> MemoryAccess for MemorySlice<'a> {
         self.base_addr
     }
     #[inline]
-    fn contents<'b>(&'b self) -> &'b [u8] {
+    fn contents(&self) -> &[u8] {
         self.contents
     }
 }

@@ -8,7 +8,7 @@ use nom::{
     },
     branch::alt,
     bytes::complete::{tag, take},
-    combinator::{cut, flat_map, map, peek, verify},
+    combinator::{cut, flat_map, map, peek, success, verify},
     error::Error,
     multi::count,
     number::complete::{be_i16, be_i8, be_u8},
@@ -19,7 +19,14 @@ use nom::{
 // detail of nom implementation
 type Bitstream<'a> = (&'a [u8], usize);
 
-pub fn decode_instr(input: &[u8]) -> IResult<&[u8], Instr> {
+//TODO: propagate parse errors
+pub fn decode_instr(input: &[u8]) -> Option<(Instr, usize)> {
+    let (remaining, instr) = one_instr(input).ok()?;
+    let len = input.len() - remaining.len();
+    Some((instr, len))
+}
+
+fn one_instr(input: &[u8]) -> IResult<&[u8], Instr> {
     alt((
         zero_op_instr,
         one_op_instr,
@@ -233,6 +240,11 @@ fn extended(input: &[u8]) -> IResult<&[u8], (Vec<OperandType>, u8)> {
     )(input)
 }
 
+// silly way of generating errors
+fn check<'a>(b: bool) -> impl FnMut(&'a [u8]) -> IResult<&'a [u8], (), Error<&[u8]>> {
+    cut(verify(success(()), move |_| b))
+}
+
 fn zero_op_instr(input: &[u8]) -> IResult<&[u8], Instr> {
     let (mut input, op) = zero_op(input)?;
     use opcode::zero_op::*;
@@ -240,14 +252,8 @@ fn zero_op_instr(input: &[u8]) -> IResult<&[u8], Instr> {
         0x10..=0xff => panic!("parser should emit a 4-bit opcode"),
         R_TRUE => Instr::RTrue,
         R_FALSE => Instr::RFalse,
-        PRINT => Instr::Print {
-            // TODO
-            ztext: Vec::new(),
-        },
-        PRINT_RET => Instr::PrintRet {
-            // TODO
-            ztext: Vec::new(),
-        },
+        PRINT => Instr::Print,
+        PRINT_RET => Instr::PrintRet,
         NOP => Instr::Nop,
         RESTART => Instr::Restart,
         RET_POPPED => Instr::RetPopped,
@@ -600,9 +606,227 @@ fn var_op_instr(input: &[u8]) -> IResult<&[u8], Instr> {
         operands.push(op.unwrap());
         input = new_input;
     }
+    let n_ops = operands.len();
+    use opcode::var_op::*;
     let instr = match opcode {
-        0x00..=0x1f => unimplemented!(),
         0x20..=0xff => panic!("parser should return a 5-bit opcode"),
+        CALL_VS | CALL_VS2 => {
+            check((1..=8).contains(&n_ops))(input)?;
+            let (new_input, dst) = dst_var(input)?;
+            input = new_input;
+            let routine_paddr = operands.remove(0);
+            Instr::CallVS {
+                routine_paddr,
+                args: operands,
+                dst,
+            }
+        }
+        STOREW => {
+            check(n_ops == 3)(input)?;
+            Instr::StoreW {
+                array: operands[0],
+                word_index: operands[1],
+                val: operands[2],
+            }
+        }
+        STOREB => {
+            check(n_ops == 3)(input)?;
+            Instr::StoreB {
+                array: operands[0],
+                byte_index: operands[1],
+                val: operands[2],
+            }
+        }
+        PUT_PROP => {
+            check(n_ops == 3)(input)?;
+            Instr::PutProp {
+                obj_id: operands[0],
+                prop: operands[1],
+                val: operands[2],
+            }
+        }
+        AREAD => {
+            check(n_ops == 2 || n_ops == 4)(input)?;
+            let (new_input, dst) = dst_var(input)?;
+            input = new_input;
+            Instr::ARead {
+                text: operands[0],
+                parse: operands[1],
+                time: operands.get(2).copied(),
+                routine_paddr: operands.get(3).copied(),
+                dst,
+            }
+        }
+        PRINT_CHAR => {
+            check(n_ops == 1)(input)?;
+            Instr::PrintChar {
+                zscii_code: operands[0],
+            }
+        }
+        PRINT_NUM => {
+            check(n_ops == 1)(input)?;
+            Instr::PrintNum { val: operands[0] }
+        }
+        RANDOM => {
+            check(n_ops == 1)(input)?;
+            let (new_input, dst) = dst_var(input)?;
+            input = new_input;
+            Instr::Random {
+                range: operands[0],
+                dst,
+            }
+        }
+        PUSH => {
+            check(n_ops == 1)(input)?;
+            Instr::Push { val: operands[0] }
+        }
+        PULL => {
+            check(n_ops == 1)(input)?;
+            Instr::Pull {
+                var_by_ref: operands[0],
+            }
+        }
+        SPLIT_WINDOW => {
+            check(n_ops == 1)(input)?;
+            Instr::SplitWindow { lines: operands[0] }
+        }
+        SET_WINDOW => {
+            check(n_ops == 1)(input)?;
+            Instr::SetWindow {
+                window: operands[0],
+            }
+        }
+        ERASE_WINDOW => {
+            check(n_ops == 1)(input)?;
+            Instr::EraseWindow {
+                window: operands[0],
+            }
+        }
+        ERASE_LINE => {
+            check(n_ops == 1)(input)?;
+            Instr::EraseLine { val: operands[0] }
+        }
+        SET_CURSOR => {
+            check(n_ops == 2)(input)?;
+            Instr::SetCursor {
+                line: operands[0],
+                column: operands[1],
+            }
+        }
+        GET_CURSOR => {
+            check(n_ops == 1)(input)?;
+            Instr::GetCursor { array: operands[0] }
+        }
+        SET_TEXT_STYLE => {
+            check(n_ops == 1)(input)?;
+            Instr::SetTextStyle { style: operands[0] }
+        }
+        BUFFER_MODE => {
+            check(n_ops == 1)(input)?;
+            Instr::BufferMode { flag: operands[0] }
+        }
+        OUTPUT_STREAM => {
+            check(n_ops == 2)(input)?;
+            Instr::OutputStream {
+                number: operands[0],
+                table: operands[1],
+            }
+        }
+        INPUT_STREAM => {
+            check(n_ops == 1)(input)?;
+            Instr::InputStream {
+                number: operands[0],
+            }
+        }
+        SOUND_EFFECT => Instr::SoundEffect {
+            number: operands.get(0).copied(),
+            effect: operands.get(1).copied(),
+            volume: operands.get(2).copied(),
+            routine: operands.get(3).copied(),
+        },
+        READ_CHAR => {
+            check(n_ops == 1 || n_ops == 3)(input)?;
+            let (new_input, dst) = dst_var(input)?;
+            input = new_input;
+            Instr::ReadChar {
+                always_one: operands[0],
+                time: operands.get(1).copied(),
+                routine: operands.get(2).copied(),
+                dst,
+            }
+        }
+        SCAN_TABLE => {
+            check(n_ops == 3 || n_ops == 4)(input)?;
+            let (new_input, dst) = dst_var(input)?;
+            let (new_input, bdata) = branch_data(new_input)?;
+            input = new_input;
+            Instr::ScanTable {
+                x: operands[0],
+                table: operands[1],
+                len: operands[2],
+                form: operands.get(3).copied(),
+                dst,
+                bdata,
+            }
+        }
+        NOT => {
+            check(n_ops == 1)(input)?;
+            let (new_input, dst) = dst_var(input)?;
+            input = new_input;
+            Instr::Not {
+                val: operands[0],
+                dst,
+            }
+        }
+        CALL_VN | CALL_VN2 => {
+            check((1..=8).contains(&n_ops))(input)?;
+            let routine_paddr = operands.remove(0);
+            Instr::CallVN {
+                routine_paddr,
+                args: operands,
+            }
+        }
+        TOKENIZE => {
+            check(n_ops == 4)(input)?;
+            Instr::Tokenize {
+                text: operands[0],
+                parse: operands[1],
+                dictionary: operands[2],
+                flag: operands[3],
+            }
+        }
+        ENCODE_TEXT => {
+            check(n_ops == 4)(input)?;
+            Instr::EncodeText {
+                zscii_text: operands[0],
+                length: operands[1],
+                from: operands[2],
+                coded_text: operands[3],
+            }
+        }
+        COPY_TABLE => {
+            check(n_ops == 3)(input)?;
+            Instr::CopyTable {
+                first: operands[0],
+                second: operands[1],
+                size: operands[2],
+            }
+        }
+        PRINT_TABLE => {
+            check(n_ops >= 2)(input)?;
+            Instr::PrintTable {
+                zscii_text: operands[0],
+                width: operands[1],
+                height: operands.get(2).copied(),
+                skip: operands.get(3).copied(),
+            }
+        }
+        CHECK_ARG_COUNT => {
+            check(n_ops == 1)(input)?;
+            Instr::CheckArgCount {
+                arg_num: operands[0],
+            }
+        }
     };
     Ok((input, instr))
 }
@@ -615,8 +839,95 @@ fn extended_instr(input: &[u8]) -> IResult<&[u8], Instr> {
         operands.push(op.unwrap());
         input = new_input;
     }
+    let n_ops = operands.len();
+    use opcode::extended::*;
     let instr = match opcode {
-        0x00..=0xff => unimplemented!(),
+        SAVE => {
+            let (new_input, dst) = dst_var(input)?;
+            input = new_input;
+            Instr::Save {
+                table: operands.get(0).copied(),
+                bytes: operands.get(1).copied(),
+                name: operands.get(2).copied(),
+                prompt: operands.get(3).copied(),
+                dst,
+            }
+        }
+        RESTORE => {
+            let (new_input, dst) = dst_var(input)?;
+            input = new_input;
+            Instr::Restore {
+                table: operands.get(0).copied(),
+                bytes: operands.get(1).copied(),
+                name: operands.get(2).copied(),
+                prompt: operands.get(3).copied(),
+                dst,
+            }
+        }
+        LOG_SHIFT => {
+            check(n_ops == 2)(input)?;
+            let (new_input, dst) = dst_var(input)?;
+            input = new_input;
+            Instr::LogShift {
+                number: operands[0],
+                places: operands[1],
+                dst,
+            }
+        }
+        ART_SHIFT => {
+            check(n_ops == 2)(input)?;
+            let (new_input, dst) = dst_var(input)?;
+            input = new_input;
+            Instr::ArtShift {
+                number: operands[0],
+                places: operands[1],
+                dst,
+            }
+        }
+        SET_FONT => {
+            check(n_ops == 1)(input)?;
+            let (new_input, dst) = dst_var(input)?;
+            input = new_input;
+            Instr::SetFont {
+                font: operands[0],
+                dst,
+            }
+        }
+        SAVE_UNDO => {
+            check(n_ops == 0)(input)?;
+            let (new_input, dst) = dst_var(input)?;
+            input = new_input;
+            Instr::SaveUndo { dst }
+        }
+        RESTORE_UNDO => {
+            check(n_ops == 0)(input)?;
+            let (new_input, dst) = dst_var(input)?;
+            input = new_input;
+            Instr::RestoreUndo { dst }
+        }
+        PRINT_UNICODE => {
+            check(n_ops == 1)(input)?;
+            Instr::PrintUnicode {
+                char_num: operands[0],
+            }
+        }
+        CHECK_UNICODE => {
+            check(n_ops == 1)(input)?;
+            let (new_input, dst) = dst_var(input)?;
+            input = new_input;
+            Instr::CheckUnicode {
+                char_num: operands[0],
+                dst,
+            }
+        }
+        SET_TRUE_COLOR => {
+            check(n_ops == 2)(input)?;
+            Instr::SetTrueColor {
+                fg: operands[0],
+                bg: operands[1],
+            }
+        }
+        opcode => Instr::IllegalExtended(opcode),
     };
     Ok((input, instr))
 }
