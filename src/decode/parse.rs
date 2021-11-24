@@ -12,7 +12,7 @@ use nom::{
     combinator::{cut, flat_map, map, peek, success, verify},
     error::Error,
     multi::count,
-    number::complete::{be_i16, be_i8, be_u8},
+    number::complete::{be_i16, be_u8},
     sequence::{preceded, tuple},
     IResult,
 };
@@ -73,7 +73,7 @@ fn operand<'a>(
     move |input: &'a [u8]| match op_type {
         // cut because this happens after we've decoded the instruction itself
         OperandType::LargeConst => cut(map(be_i16, |n| Some(Operand::LargeConst(n))))(input),
-        OperandType::SmallConst => cut(map(be_i8, |n| Some(Operand::SmallConst(n))))(input),
+        OperandType::SmallConst => cut(map(be_u8, |n| Some(Operand::SmallConst(n))))(input),
         OperandType::Variable => cut(map(be_u8, |v| Some(Operand::Variable(v))))(input),
         OperandType::Omitted => Ok((input, None)),
     }
@@ -299,7 +299,7 @@ fn zero_op_instr(input: &[u8]) -> IResult<&[u8], Instr> {
 
 fn one_op_instr(input: &[u8]) -> IResult<&[u8], Instr> {
     let (input, (op_type, opcode)) = one_op(input)?;
-    let (input, operand) = cut(operand(op_type))(input)?;
+    let (input, operand) = operand(op_type)(input)?;
     let operand = operand.unwrap();
     let mut input = input;
     use opcode::one_op::*;
@@ -311,8 +311,8 @@ fn one_op_instr(input: &[u8]) -> IResult<&[u8], Instr> {
             Instr::JZ { a: operand, bdata }
         }
         GET_SIBLING => {
-            let (new_input, bdata) = branch_data(input)?;
-            let (new_input, dst) = dst_var(new_input)?;
+            let (new_input, dst) = dst_var(input)?;
+            let (new_input, bdata) = branch_data(new_input)?;
             input = new_input;
             Instr::GetSibling {
                 obj_id: operand,
@@ -321,8 +321,8 @@ fn one_op_instr(input: &[u8]) -> IResult<&[u8], Instr> {
             }
         }
         GET_CHILD => {
-            let (new_input, bdata) = branch_data(input)?;
-            let (new_input, dst) = dst_var(new_input)?;
+            let (new_input, dst) = dst_var(input)?;
+            let (new_input, bdata) = branch_data(new_input)?;
             input = new_input;
             Instr::GetChild {
                 obj_id: operand,
@@ -388,8 +388,8 @@ fn one_op_instr(input: &[u8]) -> IResult<&[u8], Instr> {
 
 fn two_op_instr(input: &[u8]) -> IResult<&[u8], Instr> {
     let (input, (op_type1, op_type2, opcode)) = alt((long_two_op, var_two_op))(input)?;
-    let (input, op1) = cut(operand(op_type1))(input)?;
-    let (input, op2) = cut(operand(op_type2))(input)?;
+    let (input, op1) = operand(op_type1)(input)?;
+    let (input, op2) = operand(op_type2)(input)?;
     let op1 = op1.unwrap();
     let op2 = op2.unwrap();
     let mut input = input;
@@ -619,11 +619,11 @@ fn two_op_var_je_instr(input: &[u8]) -> IResult<&[u8], Instr> {
     let (mut input, op_types) = two_op_var_je(input)?;
     let mut operands: Vec<Operand> = Vec::new();
     for op_type in op_types {
-        let (new_input, op) = cut(operand(op_type))(input)?;
+        let (new_input, op) = operand(op_type)(input)?;
         operands.push(op.unwrap());
         input = new_input;
     }
-    check(operands.len() >= 1)(input)?;
+    check(!operands.is_empty())(input)?;
     let (new_input, bdata) = branch_data(input)?;
     input = new_input;
     let a = operands.remove(0);
@@ -794,8 +794,8 @@ fn var_op_instr(input: &[u8]) -> IResult<&[u8], Instr> {
         }
         SCAN_TABLE => {
             check(n_ops == 3 || n_ops == 4)(input)?;
-            let (new_input, dst) = dst_var(input)?;
-            let (new_input, bdata) = branch_data(new_input)?;
+            let (new_input, bdata) = branch_data(input)?;
+            let (new_input, dst) = dst_var(new_input)?;
             input = new_input;
             Instr::ScanTable {
                 x: operands[0],
@@ -972,12 +972,6 @@ fn extended_instr(input: &[u8]) -> IResult<&[u8], Instr> {
     Ok((input, instr))
 }
 
-pub fn test() {
-    let print: [u8; 1] = [0xbe];
-    let (_, print_instr) = zero_op_instr(&print).unwrap();
-    println!("{:?}", print_instr);
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -997,6 +991,19 @@ mod tests {
     fn test_extended_isnt_zero_op() {
         let extended: [u8; 1] = [0xbe];
         let (_, _) = zero_op_instr(&extended).unwrap();
+    }
+
+    #[test]
+    fn test_short_branch() {
+        let byte: [u8; 1] = [0x42];
+        let (_, bdata) = branch_data(&byte).expect("failed to parse");
+        assert_eq!(
+            bdata,
+            BranchData {
+                invert_cond: true,
+                dst: BranchDst::Offset(2)
+            }
+        );
     }
 
     #[test]

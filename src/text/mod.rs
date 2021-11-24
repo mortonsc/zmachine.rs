@@ -151,7 +151,7 @@ impl Zscii {
         Some(Zscii(byte))
     }
 
-    fn to_unicode(self, utt: UnicodeTransTable) -> ZsciiResult<char> {
+    pub fn to_unicode(self, utt: UnicodeTransTable) -> ZsciiResult<char> {
         let zb = self.0;
         match zb {
             0 => Ok('\0'),
@@ -482,6 +482,7 @@ pub enum ZsciiError {
     OutputOnly(u8),
     Undefined(u8),
     UnicodeTransMissing(u8),
+    OutOfRange(i16),
     NotImplemented(u8),
 }
 

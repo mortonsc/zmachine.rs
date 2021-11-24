@@ -1,6 +1,5 @@
 use crate::text::ZStr;
 use std::cmp;
-use std::convert::TryInto;
 
 use super::memory::*;
 
@@ -210,6 +209,13 @@ impl<'a> Object<'a> {
         self.data.write_byte(byte_num, current | (1 << bit_num))
     }
 
+    pub fn clear_attr(self, attr: usize) -> MemoryWrite {
+        let (byte_num, bit_num) = Self::attr_location(attr);
+        let current = self.data.read_byte(byte_num).unwrap();
+        let bit_mask = 0xff ^ (1 << bit_num);
+        self.data.write_byte(byte_num, current & bit_mask)
+    }
+
     #[inline]
     fn set_parent_id(self, parent_id: u16) -> MemoryWrite {
         self.data.write_word(Self::PARENT_ID_OFFSET, parent_id)
@@ -302,8 +308,45 @@ impl<'a> Property<'a> {
     }
 
     #[inline]
-    pub fn byteaddr(self) -> u16 {
-        self.data.base_byteaddr().try_into().unwrap()
+    pub fn byteaddr(self) -> usize {
+        self.data.base_byteaddr()
+    }
+
+    pub fn put(self, val: i16) -> Option<MemoryWrite> {
+        match self.len() {
+            1 => Some(MemoryWrite {
+                byteaddr: self.byteaddr(),
+                data: WriteData::Byte(val as u8),
+            }),
+            2 => Some(MemoryWrite {
+                byteaddr: self.byteaddr(),
+                data: WriteData::Word(val as u16),
+            }),
+            _ => None,
+        }
+    }
+
+    // returns the property whose memory begins at the given address
+    // spec for `get prop_len property_address` says
+    // "It is illegal to try to find the property length of a property
+    // "which does not exist for the given object, and an interpreter
+    // "should halt with an error message
+    // "(if it can efficiently check this condition).
+    //  which is incomprehensible since the instruction by itself
+    //  contains no reference to an object
+    //  although in practice it's used along with `get prop_addr object property`
+    pub fn by_byteaddr(mm: &'a MemoryMap<'a>, byteaddr: usize) -> Option<Self> {
+        let byte_neg1 = mm.read_byte(byteaddr - 1).ok()?;
+        let (id, data_len) = if (byte_neg1 & 0x80) != 0 {
+            //two-byte header, and this is the second byte
+            let byte_neg2 = mm.read_byte(byteaddr - 2).ok()?;
+            parse_2byte_prop_header(byte_neg2, byte_neg1)
+        } else {
+            //one-byte header
+            parse_1byte_prop_header(byte_neg1)
+        };
+        let data = mm.file().get_subslice(byteaddr, byteaddr + data_len);
+        Some(Self { id, data })
     }
 }
 
@@ -342,10 +385,10 @@ pub struct PropertyTable<'a> {
 
 impl<'a> PropertyTable<'a> {
     fn new(mm: &'a MemoryMap<'a>, byteaddr: usize) -> Option<Self> {
-        let mut table = mm.slice_from(byteaddr);
+        let mut table = mm.slice_from(byteaddr).ok()?;
         let name_len_words = table.take_byte()?;
         let name_len_bytes = 2 * (name_len_words as usize);
-        let short_name = table.take_n_bytes(name_len_bytes);
+        let short_name = table.take_n_bytes(name_len_bytes)?;
         let short_name = ZStr::from(short_name);
         Some(PropertyTable {
             short_name,
@@ -388,30 +431,6 @@ impl<'a> PropertyTable<'a> {
         assert!(current_prop.unwrap().id == id);
         // None is a valid result; it means current_prop is the last one in the table
         iter.next()
-    }
-
-    // returns the property whose memory begins at the given address
-    // TODO: really shouldn't be an instance method of PropertyTable
-    // spec for `get prop_len property_address` says
-    // "It is illegal to try to find the property length of a property
-    // "which does not exist for the given object, and an interpreter
-    // "should halt with an error message
-    // "(if it can efficiently check this condition).
-    //  which is incomprehensible since the instruction by itself
-    //  contains no reference to an object
-    //  although in practice it's used along with `get prop_addr object property`
-    pub fn by_byteaddr(&self, byteaddr: usize) -> Option<Property<'a>> {
-        let byte_neg1 = self.mm.read_byte(byteaddr - 1)?;
-        let (id, data_len) = if (byte_neg1 & 0x80) != 0 {
-            //two-byte header, and this is the second byte
-            let byte_neg2 = self.mm.read_byte(byteaddr - 2)?;
-            parse_2byte_prop_header(byte_neg2, byte_neg1)
-        } else {
-            //one-byte header
-            parse_1byte_prop_header(byte_neg1)
-        };
-        let data = self.mm.file().get_subslice(byteaddr, byteaddr + data_len);
-        Some(Property { id, data })
     }
 }
 
@@ -459,7 +478,7 @@ fn take_prop_header(table: &mut MemorySlice) -> Option<(u8, usize)> {
 
 fn take_property<'a>(table: &mut MemorySlice<'a>) -> Option<Property<'a>> {
     let (id, data_len) = take_prop_header(table)?;
-    let data = table.take_n_bytes(data_len);
+    let data = table.take_n_bytes(data_len)?;
     Some(Property { id, data })
 }
 

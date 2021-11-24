@@ -44,7 +44,12 @@ impl<'a> MemoryMap<'a> {
     }
 
     fn initialize(mut self) -> Option<Self> {
-        let version = self.read_byte(header::VERSION_NUM_B)?;
+        // check validity of the header
+        if self.memory.len() < header::LEN_BYTES {
+            return None;
+        }
+
+        let version = self.read_byte(header::VERSION_NUM_B).unwrap();
         self.version = match version {
             1 | 2 | 3 | 4 | 6 => panic!("Version not supported: {}", version),
             5 => Version::V5,
@@ -52,10 +57,12 @@ impl<'a> MemoryMap<'a> {
             8 => Version::V8,
             _ => panic!("Version not recognized: {}", version),
         };
-        self.static_mem_base_byteaddr = self.read_word(header::STATIC_MEM_BASE_BYTEADDR)? as usize;
-        self.global_vars_byteaddr = self.read_word(header::GLOBAL_VAR_TABLE_BYTEADDR)? as usize;
-        self.routines_offset = self.read_word(header::ROUTINES_OFFSET_W)? as usize;
-        self.strings_offset = self.read_word(header::STRING_OFFSET_W)? as usize;
+        self.static_mem_base_byteaddr =
+            self.read_word(header::STATIC_MEM_BASE_BYTEADDR).unwrap() as usize;
+        self.global_vars_byteaddr =
+            self.read_word(header::GLOBAL_VAR_TABLE_BYTEADDR).unwrap() as usize;
+        self.routines_offset = self.read_word(header::ROUTINES_OFFSET_W).unwrap() as usize;
+        self.strings_offset = self.read_word(header::STRING_OFFSET_W).unwrap() as usize;
         Some(self)
     }
 
@@ -82,41 +89,73 @@ impl<'a> MemoryMap<'a> {
     }
 
     #[inline]
-    pub fn apply_write_byte(&mut self, byteaddr: usize, val: u8) {
+    pub fn apply_write_byte_unchecked(&mut self, byteaddr: usize, val: u8) {
         self.memory[byteaddr] = val;
     }
 
     #[inline]
-    pub fn apply_write_word(&mut self, byteaddr: usize, val: u16) {
+    pub fn apply_write_word_unchecked(&mut self, byteaddr: usize, val: u16) {
         let [byte1, byte2] = val.to_be_bytes();
         self.memory[byteaddr] = byte1;
         self.memory[byteaddr + 1] = byte2;
     }
 
-    pub fn apply(&mut self, write: MemoryWrite) {
+    pub fn apply_write_byte(&mut self, byteaddr: usize, val: u8) -> MemResult<()> {
+        // TODO: check illegal writes to the header
+        if byteaddr >= self.memory.len() {
+            Err(MemError {
+                byteaddr,
+                kind: ErrorKind::ByteAddrOutOfRange,
+            })
+        } else if byteaddr > u16::MAX as usize {
+            Err(MemError {
+                byteaddr,
+                kind: ErrorKind::WriteHighMem,
+            })
+        } else if byteaddr >= self.static_mem_base_byteaddr {
+            Err(MemError {
+                byteaddr,
+                kind: ErrorKind::WriteStaticMem,
+            })
+        } else {
+            self.apply_write_byte_unchecked(byteaddr, val);
+            Ok(())
+        }
+    }
+
+    pub fn apply_write_word(&mut self, byteaddr: usize, val: u16) -> MemResult<()> {
+        let [byte1, byte2] = val.to_be_bytes();
+        self.apply_write_byte(byteaddr, byte1)?;
+        self.apply_write_byte(byteaddr + 1, byte2)?;
+        Ok(())
+    }
+
+    pub fn apply(&mut self, write: MemoryWrite) -> MemResult<()> {
         //TODO: enforce boundary between dynamic/static, protect read-only header data, etc
         let addr = write.byteaddr as usize;
         match write.data {
-            WriteData::Byte(byte) => self.apply_write_byte(addr, byte),
-            WriteData::Word(word) => self.apply_write_word(addr, word),
+            WriteData::Byte(byte) => self.apply_write_byte(addr, byte)?,
+            WriteData::Word(word) => self.apply_write_word(addr, word)?,
             WriteData::ByteRange(ref bytes) => {
                 for (offset, byte) in bytes.iter().enumerate() {
-                    self.apply_write_byte(addr + offset, *byte);
+                    self.apply_write_byte(addr + offset, *byte)?;
                 }
             }
             WriteData::WordRange(ref words) => {
                 for (offset, word) in words.iter().enumerate() {
-                    self.apply_write_word(addr + (2 * offset), *word);
+                    self.apply_write_word(addr + (2 * offset), *word)?;
                 }
             }
         }
+        Ok(())
     }
 
     #[inline]
-    pub fn apply_all<I: IntoIterator<Item = MemoryWrite>>(&mut self, writes: I) {
+    pub fn apply_all<I: IntoIterator<Item = MemoryWrite>>(&mut self, writes: I) -> MemResult<()> {
         for write in writes.into_iter() {
-            self.apply(write);
+            self.apply(write)?;
         }
+        Ok(())
     }
 
     // returns a MemorySlice containing the entirety of memory
@@ -128,13 +167,16 @@ impl<'a> MemoryMap<'a> {
         }
     }
 
-    pub fn header_extension_word(&self, index: usize) -> Option<u16> {
-        let header_ext_addr = self.read_word(0x36)? as usize;
+    pub fn header_extension_word(&self, index: usize) -> MemResult<u16> {
+        let header_ext_addr = self.read_word(header::EXTENSION_BYTEADDR).unwrap() as usize;
+        if header_ext_addr == 0 {
+            return Ok(0);
+        }
         let header_ext_len = self.read_word(header_ext_addr)? as usize;
         if index > header_ext_len {
-            None
+            Ok(0)
         } else {
-            Some(self.read_word(header_ext_addr + (2 * index))?)
+            self.read_word(header_ext_addr + (2 * index))
         }
     }
     #[inline]
@@ -149,12 +191,12 @@ impl<'a> MemoryMap<'a> {
         Dictionary::new(self, byteaddr)
     }
     #[inline]
-    pub fn default_properties<'b>(&self) -> DefaultPropertyTable {
-        let byteaddr = self.read_word(0xa).unwrap();
+    pub fn default_properties(&self) -> DefaultPropertyTable {
+        let byteaddr = self.read_word(header::OBJECT_TABLE_BYTEADDR).unwrap();
         DefaultPropertyTable::new(self, byteaddr)
     }
     pub fn alph_table(&self) -> AlphTable {
-        let byteaddr = self.read_word(0x34).unwrap() as usize;
+        let byteaddr = self.read_word(header::ALPH_TABLE_BYTEADDR).unwrap() as usize;
         if byteaddr == 0 {
             AlphTable::Default
         } else {
@@ -168,11 +210,11 @@ impl<'a> MemoryMap<'a> {
         AbbrTable::from_memory(self.memory, byteaddr).unwrap()
     }
     pub fn unicode_trans_table(&self) -> UnicodeTransTable {
-        let byteaddr = self.header_extension_word(3);
+        let byteaddr = self.header_extension_word(3).unwrap();
         match byteaddr {
-            None | Some(0) => UnicodeTransTable::Default,
+            0 => UnicodeTransTable::Default,
             // TODO: log error if reading the utt from memory fails
-            Some(a) => UnicodeTransTable::from_memory(&self.memory[(a as usize)..])
+            a => UnicodeTransTable::from_memory(&self.memory[(a as usize)..])
                 .unwrap_or(UnicodeTransTable::Default),
         }
     }

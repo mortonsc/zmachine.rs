@@ -4,7 +4,7 @@ pub mod parse;
 #[derive(Debug, Clone, Copy)]
 pub enum Operand {
     LargeConst(i16),
-    SmallConst(i8),
+    SmallConst(u8),
     Variable(u8),
 }
 
@@ -16,13 +16,13 @@ enum OperandType {
     Omitted,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct BranchData {
     pub invert_cond: bool,
     pub dst: BranchDst,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BranchDst {
     Offset(i16),
     Return(bool),

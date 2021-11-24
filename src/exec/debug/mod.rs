@@ -156,8 +156,12 @@ impl<'a> Context<'a> {
     fn value_as_i64_h(&self, exp: ShallowNumericExpr) -> Option<i64> {
         match exp {
             ShallowNumericExpr::Literal(val) => Some(val),
-            ShallowNumericExpr::IndirectAddrB(addr) => self.zm.mm.read_byte(addr).map(|n| n as i64),
-            ShallowNumericExpr::IndirectAddrW(addr) => self.zm.mm.read_word(addr).map(|n| n as i64),
+            ShallowNumericExpr::IndirectAddrB(addr) => {
+                self.zm.mm.read_byte(addr).ok().map(|n| n as i64)
+            }
+            ShallowNumericExpr::IndirectAddrW(addr) => {
+                self.zm.mm.read_word(addr).ok().map(|n| n as i64)
+            }
             ShallowNumericExpr::VarAccess(var) => {
                 self.zm.get_var_by_ref(var).ok().map(|v| v as i64)
             }
@@ -180,7 +184,7 @@ impl<'a> Context<'a> {
         match exp {
             // special cases to treat these values as unsigned
             ShallowNumericExpr::IndirectAddrW(addr) => {
-                self.zm.mm.read_word(addr).map(|n| n as u16 as usize)
+                self.zm.mm.read_word(addr).ok().map(|n| n as u16 as usize)
             }
             ShallowNumericExpr::VarAccess(var) => {
                 let val = self.zm.get_var_by_ref(var).ok()?;

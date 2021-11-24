@@ -14,17 +14,18 @@ impl<'a> Dictionary<'a> {
     pub const KEY_SIZE: usize = 6;
 
     pub(super) fn new(mm: &'a MemoryMap<'a>, byteaddr: u16) -> Self {
-        let mut table = mm.file().get_subslice_unbounded(byteaddr as usize);
+        // TODO: error checking
+        let mut table = mm.slice_from(byteaddr as usize).unwrap();
         let n_word_seps = table.take_byte().unwrap();
         // TODO: enforce that <space> can't be a word separator
-        let word_seps = table.take_n_bytes(n_word_seps as usize);
+        let word_seps = table.take_n_bytes(n_word_seps as usize).unwrap();
         let entry_len = table.take_byte().unwrap();
         let entry_len = entry_len as usize;
         // TODO: shouldn't use an assert for this
         assert!(entry_len >= Self::KEY_SIZE);
         let num_entries = table.take_word().unwrap();
         let table_len = entry_len * (num_entries as usize);
-        let table = table.take_n_bytes(table_len);
+        let table = table.take_n_bytes(table_len).unwrap();
         Dictionary {
             word_seps,
             table,
@@ -47,7 +48,8 @@ impl<'a> Dictionary<'a> {
         let entry_start = idx * self.entry_len;
         let entry_end = entry_start + self.entry_len;
         let mut entry = self.table.get_subslice(entry_start, entry_end);
-        let key = entry.take_n_bytes(Self::KEY_SIZE);
+        // TODO: error handling
+        let key = entry.take_n_bytes(Self::KEY_SIZE).unwrap();
         let key = ZStr::from(key);
         DictEntry { key, data: entry }
     }

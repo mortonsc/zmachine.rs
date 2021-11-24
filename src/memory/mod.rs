@@ -1,11 +1,14 @@
 use super::*;
 use crate::text::ZStr;
+use std::cmp;
 use std::ops::Deref;
 
 pub mod header;
 mod map;
 
 pub use map::MemoryMap;
+
+pub type MemResult<T> = Result<T, MemError>;
 
 pub trait MemoryAccess {
     fn base_byteaddr(&self) -> usize;
@@ -21,13 +24,16 @@ pub trait MemoryAccess {
         self.contents().is_empty()
     }
 
-    fn read_byte(&self, index: usize) -> Option<u8> {
-        self.contents().get(index).copied()
+    fn read_byte(&self, index: usize) -> MemResult<u8> {
+        self.contents().get(index).copied().ok_or(MemError {
+            byteaddr: self.byteaddr_of_index(index),
+            kind: ErrorKind::ByteAddrOutOfRange,
+        })
     }
 
     // TODO: should be i16?
-    fn read_word(&self, index: usize) -> Option<u16> {
-        Some(u16::from_be_bytes([
+    fn read_word(&self, index: usize) -> MemResult<u16> {
+        Ok(u16::from_be_bytes([
             self.read_byte(index)?,
             self.read_byte(index + 1)?,
         ]))
@@ -49,11 +55,42 @@ pub trait MemoryAccess {
         }
     }
 
-    fn slice_from(&self, index: usize) -> MemorySlice {
-        MemorySlice {
-            base_addr: self.base_byteaddr() + index,
-            contents: &self.contents()[index..],
+    fn slice_from(&self, index: usize) -> MemResult<MemorySlice> {
+        let base_addr = self.base_byteaddr() + index;
+        if index > self.len() {
+            Err(MemError {
+                byteaddr: base_addr,
+                kind: ErrorKind::ByteAddrOutOfRange,
+            })
+        } else {
+            Ok(MemorySlice {
+                base_addr: self.base_byteaddr() + index,
+                contents: &self.contents()[index..],
+            })
         }
+    }
+
+    fn slice(&self, start: usize, end: usize) -> MemResult<MemorySlice> {
+        assert!(start <= end);
+        let base_addr = self.base_byteaddr() + start;
+        let end_addr = base_addr + end;
+        if end_addr > self.base_byteaddr() + self.len() {
+            Err(MemError {
+                byteaddr: end_addr,
+                kind: ErrorKind::ByteAddrOutOfRange,
+            })
+        } else {
+            Ok(MemorySlice {
+                base_addr: self.base_byteaddr() + start,
+                contents: &self.contents()[start..end],
+            })
+        }
+    }
+
+    // returns the byteaddr of the byte at the given offset
+    #[inline]
+    fn byteaddr_of_index(&self, index: usize) -> usize {
+        self.base_byteaddr() + index
     }
 }
 
@@ -77,12 +114,6 @@ impl<'a> MemoryAccess for MemorySlice<'a> {
 }
 
 impl<'a> MemorySlice<'a> {
-    // returns the byteaddr of the byte at the given offset
-    #[inline]
-    pub fn byteaddr_of_offset(self, offset: usize) -> usize {
-        self.base_addr + offset
-    }
-
     #[inline]
     pub fn byte_iter(self) -> impl Iterator<Item = &'a u8> {
         self.contents.iter()
@@ -103,21 +134,30 @@ impl<'a> MemorySlice<'a> {
     // TODO: a lot of those functions should return Options
 
     pub fn take_byte(&mut self) -> Option<u8> {
-        let res = self.read_byte(0)?;
+        if self.is_empty() {
+            return None;
+        }
+        let res = self.read_byte(0).unwrap();
         self.base_addr += 1;
         self.contents = &self.contents[1..];
         Some(res)
     }
 
     pub fn take_word(&mut self) -> Option<u16> {
-        let res = self.read_word(0)?;
+        if self.len() < 2 {
+            return None;
+        }
+        let res = self.read_word(0).unwrap();
         self.base_addr += 2;
         self.contents = &self.contents[2..];
         Some(res)
     }
 
     // splits off a slice containing the first n bytes of this one
-    pub fn take_n_bytes(&mut self, n: usize) -> Self {
+    pub fn take_n_bytes(&mut self, n: usize) -> Option<Self> {
+        if self.len() < n {
+            return None;
+        }
         let (taken, remaining) = self.contents.split_at(n);
         let res = MemorySlice {
             base_addr: self.base_addr,
@@ -125,12 +165,12 @@ impl<'a> MemorySlice<'a> {
         };
         self.base_addr += n;
         self.contents = remaining;
-        res
+        Some(res)
     }
 
     pub fn take_zstr(&mut self) -> ZStr<'a> {
         let zstr = ZStr::from(self.contents);
-        let n = zstr.len_bytes();
+        let n = cmp::min(zstr.len_bytes(), self.len());
         let (_, remaining) = self.contents.split_at(n);
         self.base_addr += n;
         self.contents = remaining;
@@ -179,4 +219,18 @@ pub enum WriteData {
     ByteRange(Vec<u8>),
     WordRange(Vec<u16>),
     // maybe add ZStr option
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct MemError {
+    pub byteaddr: usize,
+    pub kind: ErrorKind,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub enum ErrorKind {
+    ByteAddrOutOfRange,
+    WriteStaticMem,
+    WriteHighMem,
+    WriteHeader,
 }

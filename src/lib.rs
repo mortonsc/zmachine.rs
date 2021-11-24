@@ -3,6 +3,7 @@ extern crate lazy_static;
 
 pub mod decode;
 pub mod exec;
+pub mod interface;
 pub mod memory;
 pub mod text;
 
